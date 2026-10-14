@@ -172,6 +172,12 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
+    if (target.result.os.tag == .linux) {
+        zig_stdlib_regression_tests.root_module.addCSourceFile(.{
+            .file = b.path("tests/termios-abi.c"),
+            .flags = &.{},
+        });
+    }
 
     const run_engine_tests = b.addRunArtifact(engine_tests);
     const run_launcher_tests = b.addRunArtifact(launcher_tests);

@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const terminal_attributes = @import("../terminal_attributes.zig");
 const PackageHash = @import("support/package_hash.zig");
 const PackageCache = @import("support/util/package_cache.zig");
 const PackageName = @import("support/util/package_name.zig");
@@ -229,11 +230,11 @@ const InteractiveTerminalMode = if (builtin.os.tag == .windows) struct {
 
     fn restore(_: @This()) void {}
 } else struct {
-    saved: ?std.posix.termios = null,
+    saved: ?terminal_attributes.Termios = null,
     is_tty: bool = false,
 
     fn enter() @This() {
-        const saved = std.posix.tcgetattr(0) catch return .{};
+        const saved = terminal_attributes.get(0) catch return .{};
         var raw = saved;
         raw.lflag.ICANON = false;
         raw.lflag.ECHO = false;
@@ -241,12 +242,12 @@ const InteractiveTerminalMode = if (builtin.os.tag == .windows) struct {
         raw.lflag.IEXTEN = false;
         raw.cc[@backingInt(std.posix.V.MIN)] = 1;
         raw.cc[@backingInt(std.posix.V.TIME)] = 0;
-        std.posix.tcsetattr(0, .NOW, raw) catch return .{};
+        terminal_attributes.set(0, .NOW, raw) catch return .{};
         return .{ .saved = saved, .is_tty = true };
     }
 
     fn restore(mode: @This()) void {
-        if (mode.saved) |saved| std.posix.tcsetattr(0, .NOW, saved) catch {};
+        if (mode.saved) |saved| terminal_attributes.set(0, .NOW, saved) catch {};
     }
 };
 

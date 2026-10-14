@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const terminal_attributes = @import("terminal_attributes.zig");
 
 pub const Item = struct {
     label: []const u8,
@@ -215,24 +216,24 @@ fn clearFrame(writer: *std.Io.Writer, lines: usize) !void {
 const TerminalMode = if (builtin.os.tag == .windows) WindowsTerminal else PosixTerminal;
 
 const PosixTerminal = if (builtin.os.tag == .windows) struct {} else struct {
-    saved: std.posix.termios,
+    saved: terminal_attributes.Termios,
 
     fn enter(io: std.Io) !PosixTerminal {
         _ = io;
-        const saved = try std.posix.tcgetattr(std.posix.STDIN_FILENO);
+        const saved = try terminal_attributes.get(std.posix.STDIN_FILENO);
         var raw = saved;
         raw.lflag.ICANON = false;
         raw.lflag.ECHO = false;
         raw.lflag.ISIG = false;
         raw.lflag.IEXTEN = false;
-        raw.cc[@intFromEnum(std.posix.V.MIN)] = 1;
-        raw.cc[@intFromEnum(std.posix.V.TIME)] = 0;
-        try std.posix.tcsetattr(std.posix.STDIN_FILENO, .NOW, raw);
+        raw.cc[@backingInt(std.posix.V.MIN)] = 1;
+        raw.cc[@backingInt(std.posix.V.TIME)] = 0;
+        try terminal_attributes.set(std.posix.STDIN_FILENO, .NOW, raw);
         return .{ .saved = saved };
     }
 
     fn restore(terminal: PosixTerminal) void {
-        std.posix.tcsetattr(std.posix.STDIN_FILENO, .NOW, terminal.saved) catch {};
+        terminal_attributes.set(std.posix.STDIN_FILENO, .NOW, terminal.saved) catch {};
     }
 
     fn size(_: PosixTerminal, environment: *const std.process.Environ.Map) TerminalSize {
