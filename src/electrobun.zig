@@ -58,6 +58,7 @@ const BuiltAppLaunchCommand = struct {
 };
 
 const build_lock_environment_variable = "HUTCH_ELECTROBUN_BUILD_LOCK";
+const init_handoff_environment_variable = "HUTCH_ELECTROBUN_INIT_HANDOFF";
 const bundled_uninstall_manager_file_name = "uninstall";
 
 const ManagedRootLease = struct {
@@ -262,19 +263,20 @@ pub fn run(
     }
 
     if (std.mem.eql(u8, command, "init")) {
-        runInit(&ctx, args[1..]) catch |err| {
+        const exit_code = runInit(&ctx, args[1..]) catch |err| {
             switch (err) {
                 // `runInit` already emits actionable version guidance for
                 // these catalog compatibility failures.
                 error.TemplateRequiresNewerHutch,
                 error.IncompatibleTemplateCottontail,
+                error.TemplateToolchainHandoffFailed,
                 => {},
                 else => ctx.writeStderr("hutch electrobun init: {s}\n", .{@errorName(err)}),
             }
             return 1;
         };
         pruneAutomaticOnce(&ctx);
-        return 0;
+        return exit_code;
     }
 
     if (std.mem.eql(u8, command, "sync") or std.mem.eql(u8, command, "prepare")) {
@@ -3142,7 +3144,7 @@ fn waitForBuiltApp(ctx: *const Context, running: *RunningBuiltApp) !void {
     if (termExitCode(term) != 0) return error.RunFailed;
 }
 
-fn runInit(ctx: *const Context, args: []const [:0]const u8) !void {
+fn runInit(ctx: *const Context, args: []const [:0]const u8) !u8 {
     var template_name: ?[]const u8 = null;
     var project_name: ?[]const u8 = null;
     var channel = try electrobun_templates.activeChannel(ctx.environ_map);
@@ -3186,31 +3188,51 @@ fn runInit(ctx: *const Context, args: []const [:0]const u8) !void {
         catalog,
         hutch_release.version,
         hutch_release.paired_cottontail_version,
-    ) catch |err| switch (err) {
-        error.TemplateRequiresNewerHutch => {
-            ctx.writeStderr(
-                "hutch electrobun init: the {s} template catalog requires Hutch {s}, " ++
-                    "but this executable is Hutch {s}; run `hutch upgrade` and retry\n",
-                .{ channel.name(), catalog.hutch_version, hutch_release.version },
-            );
-            return err;
-        },
-        error.IncompatibleTemplateCottontail => {
-            ctx.writeStderr(
-                "hutch electrobun init: the {s} template catalog requires exactly Cottontail {s}, " ++
-                    "but Hutch {s} is paired with Cottontail {s}; install a Hutch release paired " ++
-                    "with Cottontail {s} (try `hutch upgrade`) and retry\n",
-                .{
-                    channel.name(),
-                    catalog.cottontail_version,
-                    hutch_release.version,
-                    hutch_release.paired_cottontail_version,
-                    catalog.cottontail_version,
-                },
-            );
-            return err;
-        },
-        else => return err,
+    ) catch |err| {
+        // A channel may still publish templates from an older toolchain while
+        // Hutch has advanced, and beta and stable intentionally have different
+        // pairs. Resolve the catalog's exact release instead of weakening its
+        // Cottontail contract or changing the user's global Hutch selection.
+        if ((err == error.TemplateRequiresNewerHutch or err == error.IncompatibleTemplateCottontail) and
+            !std.mem.eql(u8, catalog.hutch_version, hutch_release.version) and
+            ctx.environ_map.get(init_handoff_environment_variable) == null)
+        {
+            return runInitWithCatalogToolchain(ctx, args, catalog) catch |handoff_error| {
+                ctx.writeStderr(
+                    "hutch electrobun init: could not prepare Hutch {s} required by the {s} templates: {s}\n",
+                    .{ catalog.hutch_version, channel.name(), @errorName(handoff_error) },
+                );
+                return error.TemplateToolchainHandoffFailed;
+            };
+        }
+        // A malformed catalog, or one that changed during handoff, must fail
+        // the same validation in the child rather than bouncing between tools.
+        switch (err) {
+            error.TemplateRequiresNewerHutch => {
+                ctx.writeStderr(
+                    "hutch electrobun init: the {s} template catalog requires Hutch {s}, " ++
+                        "but this executable is Hutch {s}; run `hutch upgrade` and retry\n",
+                    .{ channel.name(), catalog.hutch_version, hutch_release.version },
+                );
+                return err;
+            },
+            error.IncompatibleTemplateCottontail => {
+                ctx.writeStderr(
+                    "hutch electrobun init: the {s} template catalog requires exactly Cottontail {s}, " ++
+                        "but Hutch {s} is paired with Cottontail {s}; install a Hutch release paired " ++
+                        "with Cottontail {s} (try `hutch upgrade`) and retry\n",
+                    .{
+                        channel.name(),
+                        catalog.cottontail_version,
+                        hutch_release.version,
+                        hutch_release.paired_cottontail_version,
+                        catalog.cottontail_version,
+                    },
+                );
+                return err;
+            },
+            else => return err,
+        }
     };
 
     if (template_name == null) {
@@ -3231,7 +3253,7 @@ fn runInit(ctx: *const Context, args: []const [:0]const u8) !void {
         );
         switch (try terminal_ui.select(ctx.init, items, title)) {
             .selected => |index| template_name = catalog.templates[index].id,
-            .cancelled => return,
+            .cancelled => return 0,
             .unavailable => {
                 ctx.writeStdout("Electrobun {s} templates ({s}):\n", .{ catalog.version, channel.name() });
                 for (catalog.templates) |template| {
@@ -3241,7 +3263,7 @@ fn runInit(ctx: *const Context, args: []const [:0]const u8) !void {
                     "\nUsage: hutch electrobun init <project-name> --template=<name> [--channel={s}]\n",
                     .{channel.name()},
                 );
-                return;
+                return 0;
             },
         }
     }
@@ -3254,7 +3276,7 @@ fn runInit(ctx: *const Context, args: []const [:0]const u8) !void {
             template_name.?,
         )) {
             .value => |value| project_name = value,
-            .cancelled => return,
+            .cancelled => return 0,
             .unavailable => project_name = template_name,
         }
     }
@@ -3294,6 +3316,65 @@ fn runInit(ctx: *const Context, args: []const [:0]const u8) !void {
             .{project_name.?},
         );
     }
+    return 0;
+}
+
+fn runInitWithCatalogToolchain(
+    ctx: *const Context,
+    args: []const [:0]const u8,
+    catalog: electrobun_templates.Catalog,
+) !u8 {
+    const selected = try release_store.resolveLeased(
+        ctx.init,
+        ctx.allocator,
+        .hutch,
+        try version_selector.parse(catalog.hutch_version),
+        .{},
+    );
+    defer selected.close(ctx.io);
+
+    // Invoke the verified engine directly: a launcher would rediscover the
+    // enclosing project's CLI pin and select the incompatible engine again.
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(ctx.allocator);
+    try argv.appendSlice(ctx.allocator, &.{ selected.resolution.executable, "electrobun", "init" });
+    for (args) |arg| try argv.append(ctx.allocator, arg);
+
+    const launcher_path = try std.fs.path.join(ctx.allocator, &.{
+        selected.resolution.root,
+        "bin",
+        if (builtin.os.tag == .windows) "hutch.exe" else "hutch",
+    });
+    var environment = try ctx.environ_map.clone(ctx.allocator);
+    defer environment.deinit();
+    try environment.put(init_handoff_environment_variable, catalog.hutch_version);
+    try environment.put("HUTCH_LAUNCHER_PATH", launcher_path);
+    try environment.put("HUTCH_LAUNCHER_VERSION", catalog.hutch_version);
+    try environment.put("HUTCH_DEFAULT_CLI", catalog.hutch_version);
+    try environment.put("DASH_COTTONTAIL_SELECTOR", catalog.cottontail_version);
+    // The new project's pragma selects the matching pair for sync/install.
+    // An inherited test/development engine override must not undo that choice.
+    _ = environment.swapRemove("HUTCH_ENGINE_BINARY");
+    // Explicit local Cottontail binaries remain supported developer overrides,
+    // just as they are when no handoff is needed.
+
+    ctx.writeStdout(
+        "Using Hutch {s} for Electrobun {s} templates ({s})...\n",
+        .{ catalog.hutch_version, catalog.version, catalog.channel.name() },
+    );
+    var child = try std.process.spawn(ctx.io, .{
+        .argv = argv.items,
+        .cwd = .{ .path = ctx.project_root },
+        .environ_map = &environment,
+        .stdin = .inherit,
+        .stdout = .inherit,
+        .stderr = .inherit,
+    });
+    // Keep the lease until the child has exited, including cancellation paths.
+    const previous_cancel_protection = ctx.io.swapCancelProtection(.blocked);
+    defer _ = ctx.io.swapCancelProtection(previous_cancel_protection);
+    defer child.kill(ctx.io);
+    return termExitCode(try child.wait(ctx.io));
 }
 
 fn runOptionalConfiguredTask(
@@ -3359,28 +3440,64 @@ fn validateProjectName(name: []const u8) !void {
     }
 }
 
+// A watched app retains its build allocations and managed object leases until
+// it stops. The next build starts with fresh state, including after a lock wait
+// invalidated the devkit cache. Never put this state in the process arena.
+const DevWatchBuild = struct {
+    arena: std.heap.ArenaAllocator,
+    managed_root_leases: std.ArrayList(ManagedRootLease) = .empty,
+    cached_managed_devkit: ?electrobun_devkit.Resolution = null,
+
+    fn context(self: *DevWatchBuild, parent: *const Context) Context {
+        var ctx = parent.*;
+        ctx.allocator = self.arena.allocator();
+        ctx.init.arena = &self.arena;
+        ctx.managed_root_leases = &self.managed_root_leases;
+        ctx.cached_managed_devkit = &self.cached_managed_devkit;
+        return ctx;
+    }
+
+    fn deinit(self: *DevWatchBuild, io: std.Io) void {
+        for (self.managed_root_leases.items) |managed| {
+            if (managed.lease) |lease| lease.close(io);
+        }
+        self.arena.deinit();
+    }
+};
+
 fn runDevWatch(
     ctx: *const Context,
     config: CommandContext,
     inspector: ?MainProcessInspector,
 ) !void {
-    var running: ?RunningBuiltApp = try buildAndSpawnBuiltApp(ctx, config, inspector);
-    defer if (running) |*app| abandonBuiltApp(ctx, app);
-
-    var last_signature = try watchSignature(ctx, config.root);
-    ctx.writeStdout("[electrobun dev --watch] Watching for changes...\n", .{});
+    // Configuration loading may already hold a devkit lease. Release it before
+    // switching to build-owned leases so preparation can take exclusive locks.
+    suspendManagedRootLeasesBeforeProjectBuildLockWait(ctx);
+    var last_signature: ?u64 = null;
 
     while (true) {
-        std.Io.sleep(ctx.io, std.Io.Duration.fromMilliseconds(350), .awake) catch {};
-        const next_signature = try watchSignature(ctx, config.root);
-        if (next_signature == last_signature) continue;
+        var build = DevWatchBuild{ .arena = .init(ctx.init.gpa) };
+        defer build.deinit(ctx.io);
+        var build_ctx = build.context(ctx);
+        var running: ?RunningBuiltApp = try buildAndSpawnBuiltApp(&build_ctx, config, inspector);
+        defer if (running) |*app| abandonBuiltApp(&build_ctx, app);
 
-        last_signature = next_signature;
-        ctx.writeStdout("[electrobun dev --watch] Change detected, rebuilding...\n", .{});
+        if (last_signature == null) {
+            last_signature = try watchSignature(ctx, config.root);
+            ctx.writeStdout("[electrobun dev --watch] Watching for changes...\n", .{});
+        }
 
-        if (running) |*app| stopBuiltAppForRebuild(ctx, app);
-        running = null;
-        running = try buildAndSpawnBuiltApp(ctx, config, inspector);
+        while (true) {
+            std.Io.sleep(ctx.io, std.Io.Duration.fromMilliseconds(350), .awake) catch {};
+            const next_signature = try watchSignature(ctx, config.root);
+            if (next_signature == last_signature.?) continue;
+
+            last_signature = next_signature;
+            ctx.writeStdout("[electrobun dev --watch] Change detected, rebuilding...\n", .{});
+            if (running) |*app| stopBuiltAppForRebuild(&build_ctx, app);
+            running = null;
+            break;
+        }
     }
 }
 
@@ -6626,7 +6743,15 @@ fn inheritCurrentEnvironmentFromContext(ctx: *const Context, env_map: *std.proce
     if (ctx.build_lock_key) |key| try env_map.put(build_lock_environment_variable, key);
 }
 
-fn watchSignature(ctx: *const Context, root: std.json.Value) !u64 {
+fn watchSignature(parent: *const Context, root: std.json.Value) !u64 {
+    // Roots, walker buffers, full file paths and ignore checks are scratch
+    // allocations. Only the signature survives the poll, even on failure.
+    var arena = std.heap.ArenaAllocator.init(parent.init.gpa);
+    defer arena.deinit();
+    var scan_ctx = parent.*;
+    scan_ctx.allocator = arena.allocator();
+    scan_ctx.init.arena = &arena;
+    const ctx = &scan_ctx;
     var roots = try collectWatchRoots(ctx, root);
     defer roots.deinit(ctx.allocator);
 
@@ -6636,7 +6761,7 @@ fn watchSignature(ctx: *const Context, root: std.json.Value) !u64 {
 
         if (std.Io.Dir.cwd().statFile(ctx.io, root_path, .{})) |stat| {
             if (stat.kind == .file) {
-                if (!shouldIgnoreWatchPath(ctx, root, root_path)) {
+                if (!try shouldIgnoreWatchPath(ctx, root, root_path)) {
                     hasher.update(root_path);
                     hasher.update(std.mem.asBytes(&stat.size));
                     hasher.update(std.mem.asBytes(&stat.mtime));
@@ -6654,7 +6779,7 @@ fn watchSignature(ctx: *const Context, root: std.json.Value) !u64 {
         while (try walker.next(ctx.io)) |entry| {
             if (entry.kind != .file) continue;
             const full_path = try std.fs.path.join(ctx.allocator, &.{ root_path, entry.path });
-            if (shouldIgnoreWatchPath(ctx, root, full_path)) continue;
+            if (try shouldIgnoreWatchPath(ctx, root, full_path)) continue;
             const stat = std.Io.Dir.cwd().statFile(ctx.io, full_path, .{}) catch continue;
             hasher.update(full_path);
             hasher.update(std.mem.asBytes(&stat.size));
@@ -6734,18 +6859,19 @@ fn dirnameOrSelf(path: []const u8) []const u8 {
     return std.fs.path.dirname(path) orelse path;
 }
 
-fn shouldIgnoreWatchPath(ctx: *const Context, root: std.json.Value, full_path: []const u8) bool {
+fn shouldIgnoreWatchPath(ctx: *const Context, root: std.json.Value, full_path: []const u8) !bool {
     if (std.mem.indexOf(u8, full_path, "/node_modules/") != null) return true;
     if (std.mem.indexOf(u8, full_path, "\\node_modules\\") != null) return true;
     if (std.mem.indexOf(u8, full_path, "/.cottontail-tmp/") != null) return true;
+    if (std.mem.indexOf(u8, full_path, "\\.cottontail-tmp\\") != null) return true;
     if (std.mem.indexOf(u8, full_path, "/.hutch/") != null) return true;
     if (std.mem.indexOf(u8, full_path, "\\.hutch\\") != null) return true;
 
     const build = getObjectField(root, "build") orelse return false;
     const build_folder = getStringFieldFromObject(build, "buildFolder") orelse "build";
     const artifact_folder = getStringFieldFromObject(build, "artifactFolder") orelse "artifacts";
-    const build_root = std.fs.path.join(ctx.allocator, &.{ ctx.project_root, build_folder }) catch return false;
-    const artifact_root = std.fs.path.join(ctx.allocator, &.{ ctx.project_root, artifact_folder }) catch return false;
+    const build_root = try std.fs.path.join(ctx.allocator, &.{ ctx.project_root, build_folder });
+    const artifact_root = try std.fs.path.join(ctx.allocator, &.{ ctx.project_root, artifact_folder });
 
     if (std.mem.startsWith(u8, full_path, build_root)) return true;
     if (std.mem.startsWith(u8, full_path, artifact_root)) return true;
@@ -6803,6 +6929,142 @@ fn watchPathStartsWith(path: []const u8, prefix: []const u8) bool {
 
 fn isWatchPathSeparator(character: u8) bool {
     return character == '/' or character == '\\';
+}
+
+fn checkWatchAllocationFailures(allocator: std.mem.Allocator, parent: *const Context, root: std.json.Value) !void {
+    var ctx = parent.*;
+    ctx.init.gpa = allocator;
+    _ = try watchSignature(&ctx, root);
+}
+
+test "Electrobun watch rebuilds release managed leases and temporary allocations" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var fixture_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer fixture_arena.deinit();
+    const allocator = fixture_arena.allocator();
+    const home = try tmp.dir.realPathFileAlloc(io, ".", allocator);
+    const root = try std.fs.path.join(allocator, &.{ home, "releases", "fixture" });
+    try std.Io.Dir.cwd().createDirPath(io, root);
+    var environment = std.process.Environ.Map.init(allocator);
+    defer environment.deinit();
+    try environment.put("HUTCH_HOME", home);
+    var tracked = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var process_arena = std.heap.ArenaAllocator.init(tracked.allocator());
+    defer process_arena.deinit();
+    var init: std.process.Init = undefined;
+    init.io = io;
+    init.gpa = tracked.allocator();
+    init.arena = &process_arena;
+    init.environ_map = &environment;
+    const parent = Context{
+        .init = init,
+        .io = io,
+        .allocator = process_arena.allocator(),
+        .environ_map = &environment,
+        .self_exe_path = "",
+        .cottontail_home = "",
+        .cottontail_binary = "",
+        .project_root = home,
+    };
+    for (0..32) |_| {
+        {
+            var build = DevWatchBuild{ .arena = .init(init.gpa) };
+            defer build.deinit(io);
+            const ctx = build.context(&parent);
+            const graph = try managed_store.acquireUsageLock(ctx.init, ctx.allocator);
+            defer graph.close(io);
+            try retainManagedRootLeaseUnderGraph(&ctx, root);
+            try retainManagedRootLeaseUnderGraph(&ctx, root);
+            try std.testing.expectEqual(@as(usize, 1), build.managed_root_leases.items.len);
+            try std.testing.expect((try store_locks.tryAcquireObjectExclusive(io, allocator, root)) == null);
+            // Lock contention can invalidate/reacquire leases during a build.
+            suspendManagedRootLeasesBeforeProjectBuildLockWait(&ctx);
+            try retainManagedRootLeaseUnderGraph(&ctx, root);
+            try std.testing.expect((try store_locks.tryAcquireObjectExclusive(io, allocator, root)) == null);
+        }
+        const exclusive = (try store_locks.tryAcquireObjectExclusive(io, allocator, root)).?;
+        exclusive.close(io);
+        try std.testing.expectEqual(@as(usize, 0), process_arena.queryCapacity());
+        try std.testing.expectEqual(tracked.allocated_bytes, tracked.freed_bytes);
+    }
+}
+
+test "Electrobun watch polls release allocations and detect changes without rebuilding for ignored files" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var fixture_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer fixture_arena.deinit();
+    const allocator = fixture_arena.allocator();
+    const project_root = try tmp.dir.realPathFileAlloc(io, ".", allocator);
+    const config = try std.json.parseFromSliceLeaky(std.json.Value, allocator,
+        \\{"build":{"bun":{"entrypoint":"src/main.ts"},
+        \\ "views":{"main":{"entrypoint":"views/main.ts"}},
+        \\ "copy":{"assets/static.txt":"static.txt"},
+        \\ "watch":["project.marker","src/main.ts"],
+        \\ "watchIgnore":["generated/**"]}}
+    , .{});
+    for ([_][]const u8{ "src", "views", "assets", "generated", "node_modules/pkg", ".hutch/cache", ".cottontail-tmp", "build", "artifacts" }) |directory| {
+        try tmp.dir.createDirPath(io, directory);
+    }
+    const watched_paths = [_][]const u8{ "src/main.ts", "views/main.ts", "assets/static.txt", "project.marker" };
+    for (watched_paths) |path| {
+        try tmp.dir.writeFile(io, .{ .sub_path = path, .data = "original" });
+    }
+    // Include enough nested paths to grow the old process arena on every poll.
+    for (0..64) |index| {
+        const path = try std.fmt.allocPrint(allocator, "src/source-{d}.ts", .{index});
+        try tmp.dir.writeFile(io, .{ .sub_path = path, .data = "export {};" });
+    }
+    var environment = std.process.Environ.Map.init(allocator);
+    defer environment.deinit();
+    var tracked = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var process_arena = std.heap.ArenaAllocator.init(tracked.allocator());
+    defer process_arena.deinit();
+    var init: std.process.Init = undefined;
+    init.gpa = tracked.allocator();
+    init.arena = &process_arena;
+    const ctx = Context{
+        .init = init,
+        .io = io,
+        .allocator = process_arena.allocator(),
+        .environ_map = &environment,
+        .self_exe_path = "",
+        .cottontail_home = "",
+        .cottontail_binary = "",
+        .project_root = project_root,
+    };
+    var signature = try watchSignature(&ctx, config);
+    for (0..256) |_| {
+        try std.testing.expectEqual(signature, try watchSignature(&ctx, config));
+        try std.testing.expectEqual(@as(usize, 0), process_arena.queryCapacity());
+        try std.testing.expectEqual(tracked.allocated_bytes, tracked.freed_bytes);
+    }
+    for ([_][]const u8{ "generated/ignored.ts", "node_modules/pkg/index.ts", ".hutch/cache/projection.json", ".cottontail-tmp/helper.js", "build/app.js", "artifacts/app.tar" }) |path| {
+        try tmp.dir.writeFile(io, .{ .sub_path = path, .data = "ignored creation" });
+        try std.testing.expectEqual(signature, try watchSignature(&ctx, config));
+        try tmp.dir.writeFile(io, .{ .sub_path = path, .data = "ignored change with a different size" });
+        try std.testing.expectEqual(signature, try watchSignature(&ctx, config));
+    }
+    for (watched_paths) |path| {
+        try tmp.dir.writeFile(io, .{ .sub_path = path, .data = "changed with a different size" });
+        const changed = try watchSignature(&ctx, config);
+        try std.testing.expect(changed != signature);
+        signature = changed;
+    }
+    try tmp.dir.writeFile(io, .{ .sub_path = "src/added.ts", .data = "new source" });
+    const added = try watchSignature(&ctx, config);
+    try std.testing.expect(added != signature);
+    try tmp.dir.rename("src/added.ts", tmp.dir, "src/renamed.ts", io);
+    const renamed = try watchSignature(&ctx, config);
+    try std.testing.expect(renamed != added);
+    try tmp.dir.deleteFile(io, "src/renamed.ts");
+    try std.testing.expect((try watchSignature(&ctx, config)) != renamed);
+    try std.testing.expectEqual(@as(usize, 0), process_arena.queryCapacity());
+    try std.testing.expectEqual(tracked.allocated_bytes, tracked.freed_bytes);
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, checkWatchAllocationFailures, .{ &ctx, config });
 }
 
 test "watchIgnore globstar includes its base directory without matching sibling prefixes" {

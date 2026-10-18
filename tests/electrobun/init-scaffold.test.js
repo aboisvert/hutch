@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  chmodSync,
+  copyFileSync,
   existsSync,
   mkdtempSync,
   mkdirSync,
@@ -19,6 +21,7 @@ import test from "node:test";
 import {
   createCoreFixture,
   executableName,
+  hostContract,
 } from "./v2-devkit-fixture.js";
 
 const hutchRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
@@ -37,16 +40,64 @@ function nextPatchVersion(version) {
 
 function run(command, args, options) {
   return new Promise((resolveResult, reject) => {
-    const child = spawn(command, args, { ...options, stdio: ["ignore", "pipe", "pipe"] });
+    const { input, ...spawnOptions } = options;
+    const child = spawn(command, args, {
+      ...spawnOptions,
+      detached: process.platform !== "win32",
+      stdio: [input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
+    });
+    const timer = setTimeout(() => {
+      // A broken handoff guard can spawn a chain of waiting engines. Kill the
+      // whole fixture process tree so that regression fails promptly in CI.
+      if (child.pid) {
+        if (process.platform === "win32") {
+          spawnSync("taskkill", ["/pid", String(child.pid), "/t", "/f"], { stdio: "ignore" });
+        } else {
+          try { process.kill(-child.pid, "SIGKILL"); } catch {}
+        }
+      }
+      reject(new Error(`Timed out running ${command} ${args.join(" ")}`));
+    }, 60_000);
     let stdout = "";
     let stderr = "";
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
     child.stdout.on("data", (chunk) => { stdout += chunk; });
     child.stderr.on("data", (chunk) => { stderr += chunk; });
-    child.on("error", reject);
-    child.on("close", (status) => resolveResult({ status, stdout, stderr }));
+    child.on("error", (error) => { clearTimeout(timer); reject(error); });
+    child.on("close", (status) => { clearTimeout(timer); resolveResult({ status, stdout, stderr }); });
+    if (input !== undefined) child.stdin.end(input);
   });
+}
+
+function cacheHutchFixture(home, { version, engine, launcher }) {
+  const revision = "b".repeat(40);
+  const platform = hostContract().key;
+  const root = join(home, "releases", "hutch", version, revision, platform);
+  const bin = join(root, "bin");
+  mkdirSync(bin, { recursive: true });
+  const selectedEngine = join(bin, executableName("hutch-engine"));
+  const selectedLauncher = join(bin, executableName("hutch"));
+  copyFileSync(engine, selectedEngine);
+  copyFileSync(launcher, selectedLauncher);
+  if (process.platform !== "win32") {
+    chmodSync(selectedEngine, 0o755);
+    chmodSync(selectedLauncher, 0o755);
+  }
+  writeFileSync(join(root, ".dash-installed"), "c".repeat(64));
+  writeFileSync(join(root, "hutch-release.json"), JSON.stringify({
+    schema: 1,
+    kind: "archive",
+    product: "hutch",
+    channel: version.includes("-") ? "canary" : "production",
+    version,
+    revision,
+    platform,
+    launcher: `bin/${executableName("hutch")}`,
+    executable: `bin/${executableName("hutch-engine")}`,
+  }));
+  writeFileSync(`${root}.lock`, "");
+  return { root, engine: selectedEngine, launcher: selectedLauncher };
 }
 
 function resolveCottontail() {
@@ -62,7 +113,7 @@ function resolveCottontail() {
   return result.stdout.trim();
 }
 
-test("hutch electrobun init lists and downloads the active remote template channel", async () => {
+test("hutch electrobun init lists and downloads the active remote template channel", async (t) => {
   const hutch = join(hutchRoot, "zig-out", "bin", executableName("hutch"));
   const engine = join(hutchRoot, "zig-out", "bin", executableName("hutch-engine"));
   assert.ok(existsSync(hutch), `Hutch must be built before this test: ${hutch}`);
@@ -141,18 +192,22 @@ export default {
     channel: 0,
     helloArchive: 0,
     nativeArchive: 0,
+    releaseManifest: 0,
+    releaseArchive: 0,
   };
   let requiredHutchVersion = currentHutchVersion;
   let requiredCottontailVersion = pairedCottontailVersion;
+  const corruptReleaseVersion = "98.0.0";
+  const corruptReleaseArchive = Buffer.from("not the archive described by its checksum");
 
   let baseUrl;
   const server = createServer((request, response) => {
-    if (request.url === "/channels/stable.json") {
+    if (request.url === "/channels/stable.json" || request.url === "/channels/beta.json") {
       requestCounts.channel += 1;
       const catalog = {
         schema: 1,
         kind: "electrobun-template-channel",
-        channel: "stable",
+        channel: request.url === "/channels/beta.json" ? "beta" : "stable",
         version: "2.0.0",
         revision: "a".repeat(40),
         tools: {
@@ -202,6 +257,35 @@ export default {
       response.end(nativeArchive);
       return;
     }
+    if (request.url?.startsWith("/hutch/releases/")) {
+      requestCounts.releaseManifest += 1;
+      if (request.url === `/hutch/releases/${corruptReleaseVersion}/manifest.json`) {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({
+          schema: 1,
+          kind: "release",
+          product: "hutch",
+          version: corruptReleaseVersion,
+          revision: "d".repeat(40),
+          platforms: {
+            [hostContract().key]: {
+              archive: {
+                url: `${baseUrl}/hutch/builds/corrupt.tar.gz`,
+                sha256: "0".repeat(64),
+                size: corruptReleaseArchive.length,
+              },
+            },
+          },
+        }));
+        return;
+      }
+    }
+    if (request.url === "/hutch/builds/corrupt.tar.gz") {
+      requestCounts.releaseArchive += 1;
+      response.writeHead(200, { "content-type": "application/gzip" });
+      response.end(corruptReleaseArchive);
+      return;
+    }
     response.writeHead(404);
     response.end();
   });
@@ -220,10 +304,13 @@ export default {
     COTTONTAIL_BINARY: cottontail,
     DASH_COTTONTAIL: cottontail,
     DASH_HOME: dashHome,
+    HUTCH_HOME: dashHome,
+    DASH_ARTIFACTS_BASE_URL: baseUrl,
     ELECTROBUN_TEMPLATES_BASE_URL: baseUrl,
     HUTCH_ELECTROBUN_DEVKIT_ROOT: coreRoot,
     HUTCH_ENGINE_BINARY: engine,
     HUTCH_NO_UPDATE_CHECK: "1",
+    HUTCH_ACTIVE_CHANNEL: "production",
   };
 
   try {
@@ -347,9 +434,9 @@ export default {
     assert.equal(newerHutchRequired.status, 1);
     assert.match(
       newerHutchRequired.stderr,
-      new RegExp(`requires Hutch ${requiredHutchVersion.replaceAll(".", "\\.")}`),
+      new RegExp(`could not prepare Hutch ${requiredHutchVersion.replaceAll(".", "\\.")}`),
     );
-    assert.match(newerHutchRequired.stderr, /run `hutch upgrade` and retry/);
+    assert.match(newerHutchRequired.stderr, /required by the stable templates: ReleaseDownloadFailed/);
     assert.doesNotMatch(newerHutchRequired.stderr, /TemplateRequiresNewerHutch/);
     assert.equal(existsSync(join(workspace, "needs-newer-hutch")), false);
     assert.deepEqual(
@@ -367,6 +454,7 @@ export default {
       hello: requestCounts.helloArchive,
       native: requestCounts.nativeArchive,
     };
+    const manifestsBeforeCottontailMismatch = requestCounts.releaseManifest;
     const incompatibleCottontail = await run(
       hutch,
       ["electrobun", "init", "needs-cottontail", "--template=hello-world", "--skip-install"],
@@ -380,6 +468,8 @@ export default {
     assert.match(incompatibleCottontail.stderr, /try `hutch upgrade`/);
     assert.doesNotMatch(incompatibleCottontail.stderr, /IncompatibleTemplateCottontail/);
     assert.equal(existsSync(join(workspace, "needs-cottontail")), false);
+    assert.equal(requestCounts.releaseManifest, manifestsBeforeCottontailMismatch,
+      "a mismatched catalog naming the current Hutch cannot be repaired by handoff");
     assert.deepEqual(
       {
         hello: requestCounts.helloArchive,
@@ -388,6 +478,138 @@ export default {
       archivesBeforeCottontailMismatch,
       "a Cottontail mismatch must fail before downloading a template archive",
     );
+    requiredCottontailVersion = pairedCottontailVersion;
+
+    await t.test("a newer compatible Hutch keeps using its current engine", async () => {
+      requiredHutchVersion = "0.0.1";
+      const before = requestCounts.releaseManifest;
+      const result = await run(hutch, ["electrobun", "init"], { cwd: workspace, env });
+      assert.equal(result.status, 0, result.stderr || result.stdout);
+      assert.match(result.stdout, /Electrobun 2\.0\.0 templates \(stable\)/);
+      assert.doesNotMatch(result.stdout, /Using Hutch/);
+      assert.equal(requestCounts.releaseManifest, before);
+    });
+
+    const handoffReport = join(fixture, "handoff-report.json");
+    // Node is a portable stand-in for a selected release executable:
+    // its first argument is the file `electrobun`, followed by the untouched
+    // init arguments. The real engine is used separately for the loop check.
+    writeFileSync(join(workspace, "electrobun"), `
+const fs = require("node:fs");
+fs.writeFileSync(process.env.HUTCH_HANDOFF_TEST_REPORT, JSON.stringify({
+  args: process.argv.slice(2),
+  cwd: fs.realpathSync(process.cwd()),
+  input: fs.readFileSync(0, "utf8"),
+  marker: process.env.HUTCH_ELECTROBUN_INIT_HANDOFF,
+  launcher: process.env.HUTCH_LAUNCHER_PATH,
+  launcherVersion: process.env.HUTCH_LAUNCHER_VERSION,
+  defaultCLI: process.env.HUTCH_DEFAULT_CLI,
+  defaultElectrobun: process.env.HUTCH_DEFAULT_ELECTROBUN,
+  cottontailSelector: process.env.DASH_COTTONTAIL_SELECTOR,
+  engineOverride: process.env.HUTCH_ENGINE_BINARY ?? null,
+  localCottontail: process.env.COTTONTAIL_BINARY,
+  activeChannel: process.env.HUTCH_ACTIVE_CHANNEL,
+}));
+console.log("selected engine stdout");
+console.error("selected engine stderr");
+process.exit(Number(process.env.HUTCH_HANDOFF_TEST_EXIT || 0));
+`);
+    writeFileSync(join(workspace, "hutch.config.ts"),
+      `// @hutch cli=${currentHutchVersion} cottontail=${pairedCottontailVersion}\nexport default {};\n`);
+
+    for (const { version: selectedVersion, flags } of [
+      { version: "0.0.1", flags: [] },
+      { version: "0.0.2-canary.1", flags: ["--beta"] },
+    ]) {
+      await t.test(`init hands off to the exact ${flags.length ? "beta" : "stable"} catalog pair`, async () => {
+        requiredHutchVersion = selectedVersion;
+        requiredCottontailVersion = nextPatchVersion(pairedCottontailVersion);
+        const selected = cacheHutchFixture(dashHome, {
+          version: selectedVersion,
+          engine: process.execPath,
+          launcher: hutch,
+        });
+        const selectionsPath = join(dashHome, "state", "selections.json");
+        const selectionsBefore = existsSync(selectionsPath) ? readFileSync(selectionsPath, "utf8") : null;
+        const countsBefore = { ...requestCounts };
+        const args = ["init", "delegated app", "--template=hello-world", "--skip-install", ...flags];
+        const result = await run(hutch, ["electrobun", ...args], {
+          cwd: workspace,
+          input: "picker input\n",
+          env: {
+            ...env,
+            HUTCH_DEFAULT_CLI: "99.98.97",
+            HUTCH_DEFAULT_ELECTROBUN: "99.98.95",
+            DASH_COTTONTAIL_SELECTOR: "99.98.96",
+            HUTCH_HANDOFF_TEST_REPORT: handoffReport,
+          },
+        });
+        assert.equal(result.status, 0, result.stderr || result.stdout);
+        assert.match(result.stdout, /selected engine stdout/);
+        assert.match(result.stderr, /selected engine stderr/);
+        assert.deepEqual(JSON.parse(readFileSync(handoffReport, "utf8")), {
+          args,
+          cwd: realpathSync(workspace),
+          input: "picker input\n",
+          marker: selectedVersion,
+          launcher: selected.launcher,
+          launcherVersion: selectedVersion,
+          defaultCLI: selectedVersion,
+          defaultElectrobun: "99.98.95",
+          cottontailSelector: requiredCottontailVersion,
+          engineOverride: null,
+          localCottontail: cottontail,
+          activeChannel: "production",
+        });
+        assert.equal(existsSync(selectionsPath) ? readFileSync(selectionsPath, "utf8") : null, selectionsBefore,
+          "an exact init handoff must not activate a different global release");
+        assert.equal(requestCounts.releaseManifest, countsBefore.releaseManifest,
+          "a cached exact release should not require a network release lookup");
+        assert.equal(requestCounts.helloArchive, countsBefore.helloArchive,
+          "the parent must hand off before installing a template");
+
+        const failed = await run(hutch, ["electrobun", ...args], {
+          cwd: workspace,
+          env: { ...env, HUTCH_HANDOFF_TEST_REPORT: handoffReport, HUTCH_HANDOFF_TEST_EXIT: "37" },
+        });
+        assert.equal(failed.status, 37, "the selected engine's failure status must reach the caller");
+      });
+    }
+
+    await t.test("the selected engine revalidates compatibility and cannot recurse", async () => {
+      requiredHutchVersion = "0.0.3";
+      requiredCottontailVersion = nextPatchVersion(pairedCottontailVersion);
+      cacheHutchFixture(dashHome, { version: requiredHutchVersion, engine, launcher: hutch });
+      const before = { ...requestCounts };
+      const result = await run(hutch, ["electrobun", "init", "loop-app", "--template=hello-world"], {
+        cwd: workspace,
+        env,
+      });
+      assert.equal(result.status, 1, result.stderr || result.stdout);
+      assert.match(result.stderr, /requires exactly Cottontail/);
+      assert.equal(requestCounts.channel, before.channel + 2,
+        "both parent and selected engine validate the catalog exactly once");
+      assert.equal(requestCounts.helloArchive, before.helloArchive);
+      assert.equal(requestCounts.releaseManifest, before.releaseManifest);
+      assert.equal(existsSync(join(workspace, "loop-app")), false);
+    });
+
+    await t.test("handoff rejects a downloaded release with the wrong checksum", async () => {
+      requiredHutchVersion = corruptReleaseVersion;
+      requiredCottontailVersion = pairedCottontailVersion;
+      const before = { ...requestCounts };
+      const result = await run(hutch, ["electrobun", "init", "corrupt-app", "--template=hello-world"], {
+        cwd: workspace,
+        env,
+      });
+      assert.equal(result.status, 1, result.stderr || result.stdout);
+      assert.match(result.stderr, /ReleaseArchiveChecksumMismatch/);
+      assert.equal(requestCounts.releaseManifest, before.releaseManifest + 1);
+      assert.equal(requestCounts.releaseArchive, before.releaseArchive + 1);
+      assert.equal(requestCounts.helloArchive, before.helloArchive);
+      assert.equal(existsSync(join(workspace, "corrupt-app")), false);
+    });
+    requiredHutchVersion = currentHutchVersion;
     requiredCottontailVersion = pairedCottontailVersion;
 
     const requestsBeforeEnvironmentOffline = { ...requestCounts };

@@ -448,20 +448,26 @@ export default {
       const firstWatchPid = await waitForNewLauncher(watchEvents, watchSeen);
       launcherPids.add(firstWatchPid);
       await waitFor(() => watch.stdout.includes("Watching for changes"), "watch mode startup");
-      appendFileSync(join(project, "src", "bun", "index.ts"), "// watch rebuild\n");
       let secondWatchPid;
-      try {
-        secondWatchPid = await withTimeout(
-          waitForNewLauncher(watchEvents, watchSeen),
-          30_000,
-          "watch mode rebuild",
-        );
-      } catch (error) {
-        throw new Error(`${error.message}\nwatch stdout:\n${watch.stdout}\nwatch stderr:\n${watch.stderr}`);
+      let previousWatchPid = firstWatchPid;
+      // Every rebuild destroys its arena. Repeating exercises devkit cache
+      // and lease ownership after that storage has been freed and reused.
+      for (let rebuild = 0; rebuild < 4; rebuild++) {
+        appendFileSync(join(project, "src", "bun", "index.ts"), `// watch rebuild ${rebuild}\n`);
+        try {
+          secondWatchPid = await withTimeout(
+            waitForNewLauncher(watchEvents, watchSeen),
+            30_000,
+            `watch mode rebuild ${rebuild + 1}`,
+          );
+        } catch (error) {
+          throw new Error(`${error.message}\nwatch stdout:\n${watch.stdout}\nwatch stderr:\n${watch.stderr}`);
+        }
+        launcherPids.delete(previousWatchPid);
+        launcherPids.add(secondWatchPid);
+        assert.notEqual(previousWatchPid, secondWatchPid);
+        previousWatchPid = secondWatchPid;
       }
-      launcherPids.delete(firstWatchPid);
-      launcherPids.add(secondWatchPid);
-      assert.notEqual(firstWatchPid, secondWatchPid);
       assert.match(watch.stdout, /Change detected, rebuilding/);
 
       // A supervisor crash must release the OS-backed read lease. The test
