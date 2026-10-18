@@ -7064,7 +7064,12 @@ test "Electrobun watch polls release allocations and detect changes without rebu
     try std.testing.expect((try watchSignature(&ctx, config)) != renamed);
     try std.testing.expectEqual(@as(usize, 0), process_arena.queryCapacity());
     try std.testing.expectEqual(tracked.allocated_bytes, tracked.freed_bytes);
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, checkWatchAllocationFailures, .{ &ctx, config });
+    // Arena growth can resize in place depending on the allocator's current
+    // buckets/pages. Require new allocations here so the exhaustive failure
+    // sweep has the same allocation points on every run and platform. The
+    // normal allocator's resize behavior remains covered by the polls above.
+    var no_resize = std.testing.FailingAllocator.init(std.testing.allocator, .{ .resize_fail_index = 0 });
+    try std.testing.checkAllAllocationFailures(no_resize.allocator(), checkWatchAllocationFailures, .{ &ctx, config });
 }
 
 test "watchIgnore globstar includes its base directory without matching sibling prefixes" {
