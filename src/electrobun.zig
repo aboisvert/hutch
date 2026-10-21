@@ -2141,8 +2141,10 @@ const SigningTarget = struct {
     is_macho: bool = false,
 
     fn deepestFirst(_: void, lhs: SigningTarget, rhs: SigningTarget) bool {
-        if (lhs.relative_path.len != rhs.relative_path.len) {
-            return lhs.relative_path.len > rhs.relative_path.len;
+        const lhs_depth = std.mem.count(u8, lhs.relative_path, "/");
+        const rhs_depth = std.mem.count(u8, rhs.relative_path, "/");
+        if (lhs_depth != rhs_depth) {
+            return lhs_depth > rhs_depth;
         }
         return std.mem.order(u8, lhs.relative_path, rhs.relative_path) == .lt;
     }
@@ -2199,8 +2201,28 @@ fn codesignBundle(
     std.mem.sort(SigningTarget, binaries.items, {}, SigningTarget.deepestFirst);
     std.mem.sort(SigningTarget, bundles.items, {}, SigningTarget.deepestFirst);
 
+    // codesign treats a bundle's principal executable as the entire bundle.
+    // Leave it for the bundle pass, after all of its nested code is signed.
+    // Canonical paths also match versioned framework executables reached via
+    // the framework's root symlink against the files found by the walker.
+    var bundle_executables = std.StringHashMap(void).init(ctx.allocator);
+    defer bundle_executables.deinit();
+    if (try signingBundleExecutable(ctx, bundle_root)) |executable| {
+        try bundle_executables.put(executable, {});
+    }
+    for (bundles.items) |target| {
+        if (try signingBundleExecutable(ctx, target.path)) |executable| {
+            try bundle_executables.put(executable, {});
+        }
+    }
+
     ctx.writeStdout("code signing app bundle...\n", .{});
     for (binaries.items) |target| {
+        if (target.is_macho) {
+            const canonical = try std.Io.Dir.cwd().realPathFileAlloc(ctx.io, target.path, ctx.allocator);
+            defer ctx.allocator.free(canonical);
+            if (bundle_executables.contains(canonical)) continue;
+        }
         try codesignPath(
             ctx,
             developer_id,
@@ -2227,6 +2249,35 @@ fn codesignBundle(
     );
 }
 
+fn signingBundleExecutable(ctx: *const Context, bundle_root: []const u8) !?[]const u8 {
+    for ([_][]const u8{ "Contents/Info.plist", "Resources/Info.plist", "Info.plist" }) |relative_plist| {
+        const plist = try std.fs.path.join(ctx.allocator, &.{ bundle_root, relative_plist });
+        if (!pathExists(ctx.io, plist)) continue;
+        // plutil handles both XML and binary property lists. Resource-only
+        // bundles may omit CFBundleExecutable; codesign still validates the
+        // complete bundle in the later container pass.
+        const result = try std.process.run(ctx.allocator, ctx.io, .{
+            .argv = &.{ "/usr/bin/plutil", "-extract", "CFBundleExecutable", "raw", "-expect", "string", "-o", "-", plist },
+            .cwd = .{ .path = ctx.project_root },
+            .environ_map = ctx.environ_map,
+        });
+        defer ctx.allocator.free(result.stdout);
+        defer ctx.allocator.free(result.stderr);
+        if (termExitCode(result.term) != 0) return null;
+        const name = std.mem.trim(u8, result.stdout, "\r\n");
+        if (name.len == 0 or std.mem.indexOfAny(u8, name, "/\\") != null) {
+            return error.InvalidSigningBundleExecutable;
+        }
+        for ([_][]const u8{ "Contents/MacOS", "" }) |directory| {
+            const executable = try std.fs.path.join(ctx.allocator, &.{ bundle_root, directory, name });
+            if (!pathExists(ctx.io, executable)) continue;
+            return try std.Io.Dir.cwd().realPathFileAlloc(ctx.io, executable, ctx.allocator);
+        }
+        return error.SigningBundleExecutableNotFound;
+    }
+    return null;
+}
+
 fn isNestedCodeBundle(path: []const u8) bool {
     return std.mem.endsWith(u8, path, ".app") or
         std.mem.endsWith(u8, path, ".framework") or
@@ -2244,6 +2295,161 @@ test "macOS signing treats Cottontail bytecode as generic nested code" {
     try std.testing.expect(isJscBytecodePath("Contents/MacOS/cottontail-stdlib/sqlite/main.jsc"));
     try std.testing.expect(!isJscBytecodePath("Contents/MacOS/cottontail"));
     try std.testing.expect(!isJscBytecodePath("Contents/MacOS/cottontail-stdlib/sqlite/sqlite.dylib"));
+}
+
+test "macOS signing seals unsigned nested code before bundle principals" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", allocator);
+    var environment = std.process.Environ.Map.init(allocator);
+    defer environment.deinit();
+    try environment.put("PATH", "/usr/bin:/bin:/usr/sbin:/sbin");
+    try environment.put("ELECTROBUN_DEVELOPER_ID", "-");
+    const ctx = Context{
+        .init = undefined,
+        .io = io,
+        .allocator = allocator,
+        .environ_map = &environment,
+        .self_exe_path = "hutch",
+        .cottontail_home = root,
+        .cottontail_binary = "unused",
+        .project_root = root,
+    };
+    const Fixture = struct {
+        dir: std.Io.Dir,
+        ctx: *const Context,
+
+        fn path(self: @This(), relative: []const u8) ![]const u8 {
+            return std.fs.path.join(self.ctx.allocator, &.{ self.ctx.project_root, relative });
+        }
+
+        fn write(self: @This(), relative: []const u8, contents: []const u8) !void {
+            if (std.fs.path.dirname(relative)) |parent| try self.dir.createDirPath(self.ctx.io, parent);
+            try self.dir.writeFile(self.ctx.io, .{ .sub_path = relative, .data = contents });
+        }
+
+        fn copy(self: @This(), source: []const u8, destination: []const u8) !void {
+            if (std.fs.path.dirname(destination)) |parent| try self.dir.createDirPath(self.ctx.io, parent);
+            try std.Io.Dir.copyFile(self.dir, source, self.dir, destination, self.ctx.io, .{
+                .permissions = .executable_file,
+            });
+        }
+
+        fn plist(self: @This(), relative: []const u8, identifier: []const u8, kind: []const u8, executable: ?[]const u8) !void {
+            const executable_entry = if (executable) |name|
+                try std.fmt.allocPrint(self.ctx.allocator, "<key>CFBundleExecutable</key><string>{s}</string>", .{name})
+            else
+                "";
+            try self.write(relative, try std.fmt.allocPrint(
+                self.ctx.allocator,
+                "<?xml version=\"1.0\"?><plist version=\"1.0\"><dict>" ++
+                    "<key>CFBundleIdentifier</key><string>dev.hutch.signing.{s}</string>" ++
+                    "<key>CFBundlePackageType</key><string>{s}</string>" ++
+                    "<key>CFBundleVersion</key><string>1</string>{s}</dict></plist>",
+                .{ identifier, kind, executable_entry },
+            ));
+        }
+
+        fn command(self: @This(), argv: []const []const u8) ![]const u8 {
+            const result = try std.process.run(self.ctx.allocator, self.ctx.io, .{
+                .argv = argv,
+                .cwd = .{ .path = self.ctx.project_root },
+                .environ_map = self.ctx.environ_map,
+            });
+            if (termExitCode(result.term) != 0) {
+                std.debug.print("signing fixture command {s} failed:\n{s}\n{s}\n", .{ argv[0], result.stdout, result.stderr });
+            }
+            try std.testing.expectEqual(@as(u8, 0), termExitCode(result.term));
+            return result.stdout;
+        }
+
+        fn expectUnsigned(self: @This(), relative: []const u8) !void {
+            const result = try std.process.run(self.ctx.allocator, self.ctx.io, .{
+                .argv = &.{ "/usr/bin/codesign", "--verify", try self.path(relative) },
+                .environ_map = self.ctx.environ_map,
+            });
+            try std.testing.expect(termExitCode(result.term) != 0);
+            try std.testing.expect(std.mem.indexOf(u8, result.stderr, "not signed at all") != null);
+        }
+    };
+    const fixture = Fixture{ .dir = tmp.dir, .ctx = &ctx };
+
+    // Intel Mach-O files can be signed on both Mac architectures. Suppress
+    // clang's implicit ad-hoc signature so an existing signature cannot hide
+    // an incorrect signing order. The fixture binaries are never executed.
+    try fixture.write("main.c", "int main(void) { return 0; }\n");
+    _ = try fixture.command(&.{
+        "/usr/bin/clang", "-target", "x86_64-apple-macos14", "-Wl,-no_adhoc_codesign",
+        "main.c",         "-o",      "unsigned-main",
+    });
+    try fixture.expectUnsigned("unsigned-main");
+    try fixture.write("library.c", "int signing_fixture_value(void) { return 42; }\n");
+    _ = try fixture.command(&.{
+        "/usr/bin/clang", "-target",   "x86_64-apple-macos14", "-Wl,-no_adhoc_codesign",
+        "-dynamiclib",    "library.c", "-o",                   "unsigned-library",
+    });
+    try fixture.expectUnsigned("unsigned-library");
+
+    const app = "Signing Regression.app";
+    const helper = app ++ "/Contents/Frameworks/Helper.app";
+    const service = helper ++ "/Contents/XPCServices/Child.xpc";
+    const framework = app ++ "/Contents/Frameworks/Fixture.framework";
+    const resource_bundle = app ++ "/Contents/Resources/Assets.bundle";
+    // A non-launcher principal prevents a hard-coded launcher exclusion from
+    // passing. The unrelated launcher and zig-zstd have equal path lengths;
+    // shorter bun also catches sorting the principal ahead of a bare sibling.
+    try fixture.plist(app ++ "/Contents/Info.plist", "app", "APPL", "main");
+    try fixture.plist(helper ++ "/Contents/Info.plist", "helper", "APPL", "helper-main");
+    try fixture.plist(service ++ "/Contents/Info.plist", "service", "XPC!", "service-main");
+    try fixture.plist(framework ++ "/Versions/A/Resources/Info.plist", "framework", "FMWK", "Fixture");
+    try fixture.plist(resource_bundle ++ "/Contents/Info.plist", "assets", "BNDL", null);
+    // Third-party nested bundles may ship binary plists.
+    _ = try fixture.command(&.{ "/usr/bin/plutil", "-convert", "binary1", try fixture.path(helper ++ "/Contents/Info.plist") });
+    for ([_][]const u8{
+        app ++ "/Contents/MacOS/main",
+        app ++ "/Contents/MacOS/launcher",
+        app ++ "/Contents/MacOS/zig-zstd",
+        app ++ "/Contents/MacOS/bun",
+        helper ++ "/Contents/MacOS/helper-main",
+        helper ++ "/Contents/MacOS/a",
+        service ++ "/Contents/MacOS/service-main",
+        service ++ "/Contents/MacOS/z",
+    }) |destination| try fixture.copy("unsigned-main", destination);
+    try fixture.copy("unsigned-library", framework ++ "/Versions/A/Fixture");
+    try fixture.copy("unsigned-library", framework ++ "/Versions/A/Libraries/libfixture.dylib");
+    try tmp.dir.symLink(io, "A", framework ++ "/Versions/Current", .{ .is_directory = true });
+    try tmp.dir.symLink(io, "Versions/Current/Fixture", framework ++ "/Fixture", .{});
+    try tmp.dir.symLink(io, "Versions/Current/Resources", framework ++ "/Resources", .{ .is_directory = true });
+    try fixture.write(resource_bundle ++ "/Contents/Resources/data.txt", "sealed fixture resource\n");
+    const bytecode = app ++ "/Contents/MacOS/cottontail-core/host-bootstrap.jsc";
+    try fixture.write(bytecode, "opaque bytecode fixture\n");
+    try fixture.write("entitlements.plist", "<?xml version=\"1.0\"?><plist version=\"1.0\"><dict>" ++
+        "<key>com.apple.security.cs.allow-jit</key><true/></dict></plist>");
+
+    try codesignBundle(&ctx, undefined, try fixture.path(app), try fixture.path("entitlements.plist"));
+    _ = try fixture.command(&.{ "/usr/bin/codesign", "--verify", "--deep", "--strict", try fixture.path(app) });
+    for ([_][]const u8{ helper, service, framework, resource_bundle, bytecode }) |relative| {
+        _ = try fixture.command(&.{ "/usr/bin/codesign", "--verify", "--strict", try fixture.path(relative) });
+    }
+    for ([_][]const u8{ app, helper, app ++ "/Contents/MacOS/bun", app ++ "/Contents/MacOS/launcher" }) |relative| {
+        const entitlements = try fixture.command(&.{
+            "/usr/bin/codesign", "--display", "--entitlements", "-", "--xml", try fixture.path(relative),
+        });
+        try std.testing.expect(std.mem.indexOf(u8, entitlements, "<key>com.apple.security.cs.allow-jit</key>") != null);
+        try std.testing.expect(std.mem.indexOf(u8, entitlements, "<true/>") != null);
+    }
+    // Verify that nested resources are sealed by the final outer signature.
+    try fixture.write(resource_bundle ++ "/Contents/Resources/data.txt", "changed after signing\n");
+    const tampered = try std.process.run(allocator, io, .{
+        .argv = &.{ "/usr/bin/codesign", "--verify", "--deep", "--strict", try fixture.path(app) },
+        .environ_map = &environment,
+    });
+    try std.testing.expect(termExitCode(tampered.term) != 0);
 }
 
 fn machOUsesEntitlements(path: []const u8) bool {
