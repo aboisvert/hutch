@@ -59,6 +59,10 @@ test("macOS releases use and verify the supported deployment target", () => {
   );
   assert.match(
     releaseWorkflow,
+    /platform: macos-x64\s+runner: macos-26-intel\s+os: macos\s+target: x86_64-macos\.14\.0/,
+  );
+  assert.match(
+    releaseWorkflow,
     /verify-macos-deployment-target\.js zig-out\/bin\/hutch 14\.0/,
   );
   assert.match(

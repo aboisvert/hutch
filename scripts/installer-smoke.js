@@ -23,6 +23,7 @@ const hutchRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const packageJson = JSON.parse(readFileSync(join(hutchRoot, "package.json"), "utf8"));
 const platform = {
   "darwin-arm64": "macos-arm64",
+  "darwin-x64": "macos-x64",
   "linux-x64": "linux-x64",
   "linux-arm64": "linux-arm64",
   "win32-x64": "windows-x64",

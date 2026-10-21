@@ -12,6 +12,7 @@ for (const [name, os, machine, native, processArch, expected] of [
   ["Windows x64", "MINGW64_NT", "x86_64", "", "AMD64", "x86_64"],
   ["Linux ARM64 ignores Windows environment", "Linux", "aarch64", "AMD64", "AMD64", "aarch64"],
   ["macOS ARM64", "Darwin", "arm64", "", "", "aarch64"],
+  ["macOS Intel", "Darwin", "x86_64", "", "", "x86_64"],
   ["Linux x64", "Linux", "x86_64", "", "", "x86_64"],
 ]) {
   test(name, () => {

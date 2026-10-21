@@ -15,6 +15,7 @@ import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { releaseChannel } from "./release-contract.js";
+import { verifyMacosDeploymentTarget } from "./verify-macos-deployment-target.js";
 import { validateWindowsReleaseArchitecture } from "./windows-binary-architecture.mjs";
 
 const hutchRoot = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -38,6 +39,7 @@ function platformKey() {
   const key = `${process.platform}-${process.arch}`;
   return {
     "darwin-arm64": "macos-arm64",
+    "darwin-x64": "macos-x64",
     "linux-x64": "linux-x64",
     "linux-arm64": "linux-arm64",
     "win32-x64": "windows-x64",
@@ -87,6 +89,18 @@ copyFileSync(builtLauncher, join(binRoot, launcherName));
 copyFileSync(builtEngine, join(binRoot, engineName));
 if (process.platform === "win32") {
   validateWindowsReleaseArchitecture(binRoot, process.arch);
+}
+if (process.platform === "darwin") {
+  const expectedArchitecture = process.arch === "arm64" ? "arm64" : "x86_64";
+  for (const name of [launcherName, engineName]) {
+    const architecture = execFileSync("lipo", ["-archs", join(binRoot, name)], {
+      encoding: "utf8",
+    }).trim();
+    if (architecture !== expectedArchitecture) {
+      fail(`${name} has architecture ${architecture}; expected ${expectedArchitecture}`);
+    }
+    verifyMacosDeploymentTarget(join(binRoot, name), "14.0");
+  }
 }
 if (process.platform !== "win32") {
   chmodSync(join(binRoot, launcherName), 0o755);

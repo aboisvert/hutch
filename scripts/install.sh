@@ -69,6 +69,7 @@ fi
 
 case "$(uname -s)-$(uname -m)" in
   Darwin-arm64|Darwin-aarch64) platform="macos-arm64" ;;
+  Darwin-x86_64|Darwin-amd64) platform="macos-x64" ;;
   Linux-x86_64|Linux-amd64) platform="linux-x64" ;;
   Linux-arm64|Linux-aarch64) platform="linux-arm64" ;;
   *)

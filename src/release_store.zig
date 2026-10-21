@@ -1674,6 +1674,7 @@ pub fn platformKey() ![]const u8 {
     return switch (builtin.os.tag) {
         .macos => switch (builtin.cpu.arch) {
             .aarch64 => "macos-arm64",
+            .x86_64 => "macos-x64",
             else => error.UnsupportedReleasePlatform,
         },
         .linux => switch (builtin.cpu.arch) {
@@ -2268,7 +2269,7 @@ fn validateRevision(revision: []const u8) !void {
 }
 
 fn validatePlatformName(platform: []const u8) !void {
-    for ([_][]const u8{ "macos-arm64", "linux-x64", "linux-arm64", "windows-x64", "windows-arm64" }) |supported| {
+    for ([_][]const u8{ "macos-arm64", "macos-x64", "linux-x64", "linux-arm64", "windows-x64", "windows-arm64" }) |supported| {
         if (std.mem.eql(u8, platform, supported)) return;
     }
     return error.UnsupportedReleasePlatform;

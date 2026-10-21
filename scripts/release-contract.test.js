@@ -17,6 +17,7 @@ import "./upload-release-r2.test.js";
 const revision = "0123456789abcdef0123456789abcdef01234567";
 const artifacts = [
   "macos-arm64",
+  "macos-x64",
   "linux-x64",
   "linux-arm64",
   "windows-x64",
@@ -69,6 +70,13 @@ test("complete platform matrices are required", () => {
   assert.throws(
     () => createBuildManifest({ ...options, artifacts: artifacts.slice(1) }),
     /missing macos-arm64/,
+  );
+  assert.throws(
+    () => createBuildManifest({
+      ...options,
+      artifacts: artifacts.filter(({ platform }) => platform !== "macos-x64"),
+    }),
+    /missing macos-x64/,
   );
 });
 
