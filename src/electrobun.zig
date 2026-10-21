@@ -82,6 +82,8 @@ const Context = struct {
     automatic_prune_completed: ?*bool = null,
 
     fn writeStdout(self: *const Context, comptime fmt: []const u8, args: anytype) void {
+        // Zig's build test runner reserves stdout for its --listen protocol.
+        if (builtin.is_test) return self.writeStderr(fmt, args);
         var buffer: [2048]u8 = undefined;
         // Standard streams share their OS offset with the parent and children.
         // A positional writer would overwrite redirected build logs from zero.
@@ -1845,7 +1847,7 @@ fn runReleaseCommandSuccess(
         .cwd = .{ .path = cwd },
         .environ_map = environment orelse ctx.environ_map,
         .stdin = .ignore,
-        .stdout = .inherit,
+        .stdout = if (builtin.is_test) .{ .file = std.Io.File.stderr() } else .inherit,
         .stderr = .inherit,
         .create_no_window = true,
     });
