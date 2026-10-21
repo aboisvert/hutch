@@ -1842,12 +1842,28 @@ fn runReleaseCommandSuccess(
     cwd: []const u8,
     environment: ?*const std.process.Environ.Map,
 ) !bool {
+    if (builtin.is_test) {
+        // Keep subprocess output outside the test runner's stdout protocol.
+        // Capturing also avoids reopening its stderr pipe on Windows, where
+        // passing that pipe as SpawnOptions.StdIo.file fails with NoDevice.
+        const result = try std.process.run(ctx.allocator, ctx.io, .{
+            .argv = argv,
+            .cwd = .{ .path = cwd },
+            .environ_map = environment orelse ctx.environ_map,
+            .create_no_window = true,
+        });
+        defer ctx.allocator.free(result.stdout);
+        defer ctx.allocator.free(result.stderr);
+        if (result.stdout.len > 0) ctx.writeStderr("{s}", .{result.stdout});
+        if (result.stderr.len > 0) ctx.writeStderr("{s}", .{result.stderr});
+        return termExitCode(result.term) == 0;
+    }
     var child = try std.process.spawn(ctx.io, .{
         .argv = argv,
         .cwd = .{ .path = cwd },
         .environ_map = environment orelse ctx.environ_map,
         .stdin = .ignore,
-        .stdout = if (builtin.is_test) .{ .file = std.Io.File.stderr() } else .inherit,
+        .stdout = .inherit,
         .stderr = .inherit,
         .create_no_window = true,
     });
