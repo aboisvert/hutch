@@ -3594,18 +3594,22 @@ fn executableFileName(comptime basename: []const u8) []const u8 {
 }
 
 fn zigTargetName() []const u8 {
-    return switch (builtin.os.tag) {
-        .windows => if (builtin.cpu.arch == .aarch64) "aarch64-windows-gnu" else "x86_64-windows-gnu",
-        .linux => switch (builtin.cpu.arch) {
+    return zigTargetNameFor(builtin.os.tag, builtin.cpu.arch);
+}
+
+fn zigTargetNameFor(os_tag: std.Target.Os.Tag, arch: std.Target.Cpu.Arch) []const u8 {
+    return switch (os_tag) {
+        .windows => if (arch == .aarch64) "aarch64-windows-gnu" else "x86_64-windows-gnu",
+        .linux => switch (arch) {
             // Linux main processes dynamically load Electrobun's glibc-based
             // core. An unspecified ABI lets Zig select a static libc, which
             // cannot safely load that shared-library stack.
             .aarch64 => "aarch64-linux-gnu",
             else => "x86_64-linux-gnu",
         },
-        .macos => switch (builtin.cpu.arch) {
-            .aarch64 => "aarch64-macos",
-            else => "x86_64-macos",
+        .macos => switch (arch) {
+            .aarch64 => "aarch64-macos.14.0",
+            else => "x86_64-macos.14.0",
         },
         else => "native",
     };
@@ -3614,6 +3618,22 @@ fn zigTargetName() []const u8 {
 test "Linux Zig main target selects the GNU ABI" {
     if (builtin.os.tag == .linux) {
         try std.testing.expect(std.mem.endsWith(u8, zigTargetName(), "-linux-gnu"));
+    }
+}
+
+test "macOS Zig main targets preserve the architecture and macOS 14 deployment target" {
+    for ([_]std.Target.Cpu.Arch{ .aarch64, .x86_64 }) |arch| {
+        const query = try std.Target.Query.parse(.{
+            .arch_os_abi = zigTargetNameFor(.macos, arch),
+            .cpu_features = "baseline",
+        });
+        try std.testing.expectEqual(arch, query.cpu_arch.?);
+        try std.testing.expectEqual(.macos, query.os_tag.?);
+        try std.testing.expectEqualDeep(
+            std.SemanticVersion{ .major = 14, .minor = 0, .patch = 0 },
+            query.os_version_min.?.semver,
+        );
+        try std.testing.expect(query.cpu_model == .baseline);
     }
 }
 
@@ -3761,7 +3781,7 @@ fn appendProjectZigBuildArguments(
     try argv.append(allocator, "--cache-dir");
     try argv.append(allocator, cache_dir);
     try argv.append(allocator, try std.fmt.allocPrint(allocator, "-Dtarget={s}", .{zigTargetName()}));
-    if (builtin.os.tag == .windows) try argv.append(allocator, "-Dcpu=baseline");
+    if (builtin.os.tag == .windows or builtin.os.tag == .macos) try argv.append(allocator, "-Dcpu=baseline");
     try argv.append(allocator, if (build_env == .dev) "-Doptimize=Debug" else "-Doptimize=ReleaseSmall");
     try argv.append(allocator, try std.fmt.allocPrint(allocator, "-Delectrobun-sdk={s}", .{zig_sdk_path}));
 }
@@ -4922,6 +4942,7 @@ fn buildOdinMainExecutable(ctx: *const Context, config: CommandContext, platform
     if (odinMainStackLinkerArg(builtin.os.tag)) |arg| {
         try argv.append(ctx.allocator, arg);
     }
+    try argv.appendSlice(ctx.allocator, odinMainPlatformArguments(builtin.os.tag));
     if (config.build_env != .dev) {
         try argv.append(ctx.allocator, "-o:size");
     }
@@ -4952,6 +4973,25 @@ fn odinMainStackLinkerArg(os_tag: std.Target.Os.Tag) ?[]const u8 {
     // dispatcher to exhaust. Reserving virtual address space is cheap on x64
     // and brings Windows in line with typical Unix main-thread stacks.
     return if (os_tag == .windows) "-extra-linker-flags:/STACK:8388608" else null;
+}
+
+fn odinMainPlatformArguments(os_tag: std.Target.Os.Tag) []const []const u8 {
+    // Without an explicit deployment target Odin's linker can inherit the
+    // build machine's SDK version. Keep shipped apps usable on macOS 14 and
+    // avoid generating instructions specific to the CI runner's CPU.
+    return if (os_tag == .macos)
+        &.{ "-minimum-os-version:14.0", "-microarch:generic" }
+    else
+        &.{};
+}
+
+test "macOS Odin main arguments pin deployment and generic CPU compatibility" {
+    const args = odinMainPlatformArguments(.macos);
+    try std.testing.expectEqual(@as(usize, 2), args.len);
+    try std.testing.expectEqualStrings("-minimum-os-version:14.0", args[0]);
+    try std.testing.expectEqualStrings("-microarch:generic", args[1]);
+    try std.testing.expectEqual(@as(usize, 0), odinMainPlatformArguments(.linux).len);
+    try std.testing.expectEqual(@as(usize, 0), odinMainPlatformArguments(.windows).len);
 }
 
 test "Windows Odin main processes reserve an eight MiB stack" {
@@ -9015,8 +9055,9 @@ test "Zig builds invoke the project build file with the projected SDK contract" 
         .dev,
     );
 
-    const optimize_index: usize = if (builtin.os.tag == .windows) 11 else 10;
-    try std.testing.expectEqual(@as(usize, if (builtin.os.tag == .windows) 13 else 12), argv.items.len);
+    const baseline_cpu = builtin.os.tag == .windows or builtin.os.tag == .macos;
+    const optimize_index: usize = if (baseline_cpu) 11 else 10;
+    try std.testing.expectEqual(@as(usize, if (baseline_cpu) 13 else 12), argv.items.len);
     try std.testing.expectEqualStrings("/toolchains/zig/0.16.0/zig", argv.items[0]);
     try std.testing.expectEqualStrings("build", argv.items[1]);
     try std.testing.expectEqualStrings("install", argv.items[2]);
@@ -9030,7 +9071,7 @@ test "Zig builds invoke the project build file with the projected SDK contract" 
         try std.fmt.allocPrint(allocator, "-Dtarget={s}", .{zigTargetName()}),
         argv.items[9],
     );
-    if (builtin.os.tag == .windows) try std.testing.expectEqualStrings("-Dcpu=baseline", argv.items[10]);
+    if (baseline_cpu) try std.testing.expectEqualStrings("-Dcpu=baseline", argv.items[10]);
     try std.testing.expectEqualStrings("-Doptimize=Debug", argv.items[optimize_index]);
     try std.testing.expectEqualStrings(
         "-Delectrobun-sdk=/project/.hutch/devkit/zig-sdk/electrobun.zig",

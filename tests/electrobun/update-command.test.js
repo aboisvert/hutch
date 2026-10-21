@@ -30,7 +30,7 @@ function versionConstant(name) {
 function resolveCottontail(hutch) {
   const configured = process.env.COTTONTAIL_BINARY ?? process.env.DASH_COTTONTAIL;
   if (configured) return resolve(configured);
-  const result = spawnSync(hutch, ["cottontail", "path", "production"], {
+  const result = spawnSync(hutch, ["cottontail", "path"], {
     cwd: hutchRoot,
     encoding: "utf8",
   });

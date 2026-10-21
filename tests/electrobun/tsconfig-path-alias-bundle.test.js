@@ -27,7 +27,7 @@ function resolveCottontail() {
   const hutch = join(hutchRoot, "zig-out", "bin", executableName("hutch"));
   assert.ok(existsSync(hutch), `Hutch must be built before this test: ${hutch}`);
 
-  const result = spawnSync(hutch, ["cottontail", "path", "production"], {
+  const result = spawnSync(hutch, ["cottontail", "path"], {
     cwd: hutchRoot,
     encoding: "utf8",
   });
