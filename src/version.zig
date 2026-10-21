@@ -5,7 +5,7 @@ pub const version = "0.28.2-canary.0";
 /// Cottontail scripts use this pair unless a pragma or override selects one.
 /// Normal scripts use the Bun pin in toolchain_store.zig. `hutch self update`
 /// advances the paired tools; explicit Cottontail pins remain supported.
-pub const paired_cottontail_version = "0.7.3-canary.0";
+pub const paired_cottontail_version = "0.7.3-canary.1";
 
 test "the paired cottontail version is an exact semantic version" {
     const std = @import("std");
