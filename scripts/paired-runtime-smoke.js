@@ -59,7 +59,16 @@ try {
   writeFileSync(join(project, "identity.js"),
     'console.log(JSON.stringify({version: process.versions.cottontail, platform: process.platform, arch: process.arch}));\n');
   const identity = JSON.parse(run(launcher, ["identity.js"], { ...env, HUTCH_RUNTIME: "cottontail" }));
-  assert.deepEqual(identity, { version: pairedVersion, platform: process.platform, arch: process.arch });
+  const expectedIdentity = { version: pairedVersion, platform: process.platform, arch: process.arch };
+  assert.deepEqual(identity, expectedIdentity);
+  // Configuration and string scripts cross Cottontail's private-file protocol.
+  // In particular, Intel macOS must read ownership through the inode64 ABI.
+  writeFileSync(join(project, "hutch.config.ts"),
+    'export default { scripts: { "paired-runtime-private": "echo paired-runtime-private-ok" } };\n');
+  const configuredOutput = run(launcher, ["run", "paired-runtime-private"], {
+    ...env, HUTCH_RUNTIME: "cottontail",
+  });
+  assert.equal(configuredOutput, "paired-runtime-private-ok");
   assert.equal(run(launcher, ["cottontail", "path"], { ...env, DASH_RELEASE_OFFLINE: "1" }), runtimePath);
   console.log(`Packaged Hutch ${version} resolved and executed Cottontail ${pairedVersion} on ${platform}`);
 } finally {
