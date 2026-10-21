@@ -32,7 +32,7 @@ const launcher = join(fixture, artifactBase, "bin", executableName("hutch"));
 const engine = join(fixture, artifactBase, "bin", executableName("hutch-engine"));
 const env = { ...process.env, HUTCH_HOME: home, HUTCH_NO_UPDATE_CHECK: "1" };
 for (const key of [
-  "HUTCH_ENGINE_BINARY", "HUTCH_LAUNCHER_PATH", "HUTCH_RUNTIME",
+  "HUTCH_ENGINE_BINARY", "HUTCH_DEFAULT_CLI", "HUTCH_LAUNCHER_PATH", "HUTCH_RUNTIME",
   "HUTCH_ACTIVE_CHANNEL", "COTTONTAIL_BINARY", "DASH_COTTONTAIL",
   "DASH_USE_LOCAL_COTTONTAIL", "DASH_LOCAL_COTTONTAIL_ROOT", "COTTONTAIL_ROOT",
   "DASH_COTTONTAIL_SELECTOR", "DASH_RELEASE_OFFLINE", "DASH_ARTIFACTS_BASE_URL",
