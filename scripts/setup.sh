@@ -92,4 +92,5 @@ vendor_zig() {
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
   vendor_zig
   node "$SCRIPT_DIR/patch-zig-hostname-connect.js"
+  node "$SCRIPT_DIR/patch-zig-tls.js"
 fi

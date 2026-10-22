@@ -94,7 +94,7 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: vendors/zig
-          key: hutch-zig-${{ matrix.platform }}-v1-${{ hashFiles('scripts/setup.sh', 'scripts/patch-zig-hostname-connect.js', 'patches/zig-0.17.0-hostname-connect.patch') }}
+          key: hutch-zig-${{ matrix.platform }}-v2-${{ hashFiles('scripts/setup.sh', 'scripts/patch-zig-hostname-connect.js', 'patches/zig-0.17.0-hostname-connect.patch', 'scripts/patch-zig-tls.js', 'src/zig_tls_patch.json') }}
 
       - name: Set up Zig
         if: matrix.os != 'windows'
@@ -137,6 +137,8 @@ jobs:
         timeout-minutes: 20
         run: |
           ./vendors/zig/zig build test --test-timeout 120s --summary all
+          node --test scripts/zig-tls-patch.test.js
+          node scripts/native-tls-security-smoke.mjs
           node --test scripts/zig-host-architecture.test.js scripts/r2-settings.test.js scripts/release-contract.test.js scripts/release-version.test.js scripts/verify-linux-glibc.test.js scripts/verify-macos-deployment-target.test.js
           node scripts/local-stack.test.js
           node --test --test-concurrency=1 tests/storage-contract.test.js tests/electrobun/default-runtime.test.js
@@ -170,6 +172,10 @@ jobs:
         run: |
           & .\vendors\zig\zig.exe build test -Dtarget=${{ matrix.target }} --test-timeout 120s --summary all
           if ($LASTEXITCODE -ne 0) { throw "Hutch Zig tests failed" }
+          node --test scripts/zig-tls-patch.test.js
+          if ($LASTEXITCODE -ne 0) { throw "Hutch Zig TLS patch tests failed" }
+          node scripts/native-tls-security-smoke.mjs
+          if ($LASTEXITCODE -ne 0) { throw "Hutch native TLS security tests failed" }
           node --test scripts/zig-host-architecture.test.js scripts/r2-settings.test.js scripts/release-contract.test.js scripts/release-version.test.js scripts/windows-installer-architecture.test.js
           if ($LASTEXITCODE -ne 0) { throw "Hutch release tests failed" }
           node scripts/local-stack.test.js

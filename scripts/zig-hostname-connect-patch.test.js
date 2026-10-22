@@ -100,7 +100,7 @@ test("setup always verifies the patch after vendoring", async () => {
 });
 
 test("release workflow Zig cache key includes every patch input", async () => {
-  const hashFiles = /hashFiles\('scripts\/setup\.sh', 'scripts\/patch-zig-hostname-connect\.js', 'patches\/zig-0\.17\.0-hostname-connect\.patch'\)/g;
+  const hashFiles = /hashFiles\('scripts\/setup\.sh', 'scripts\/patch-zig-hostname-connect\.js', 'patches\/zig-0\.17\.0-hostname-connect\.patch', 'scripts\/patch-zig-tls\.js', 'src\/zig_tls_patch\.json'\)/g;
   const releaseWorkflow = await readFile(path.join(hutchRoot, ".github", "workflows", "release.yml"), "utf8");
   assert.equal(releaseWorkflow.match(hashFiles)?.length, 1);
 });

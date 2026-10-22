@@ -7,6 +7,7 @@ bash "$SCRIPT_DIR/build.sh" build
 bash "$SCRIPT_DIR/build.sh" build test
 node "$SCRIPT_DIR/local-stack.test.js"
 node "$SCRIPT_DIR/release-store-smoke.js"
+node "$SCRIPT_DIR/native-tls-security-smoke.mjs"
 node "$SCRIPT_DIR/run-local-package-manager-tests.js" --all
 node --test \
   "$SCRIPT_DIR/stdio-redirection.test.js" \
@@ -29,3 +30,4 @@ node --test --test-concurrency=1 \
   "$SCRIPT_DIR/../tests/electrobun/update-command.test.js" \
   "$SCRIPT_DIR/../tests/electrobun/v2-devkit-sync.test.js"
 node --test "$SCRIPT_DIR/zig-hostname-connect-patch.test.js"
+node --test "$SCRIPT_DIR/zig-tls-patch.test.js"

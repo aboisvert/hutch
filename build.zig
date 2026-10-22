@@ -1,5 +1,16 @@
 const std = @import("std");
 
+comptime {
+    if (!@hasDecl(std.crypto.Certificate, "compromised_spki_policy_version") or
+        std.crypto.Certificate.compromised_spki_policy_version < 20261021 or
+        !@hasDecl(std.crypto.tls.Client, "compromised_spki_policy_version") or
+        std.crypto.tls.Client.compromised_spki_policy_version < 20261021 or
+        (std.crypto.Certificate.Chain != void and
+            (!@hasDecl(std.crypto.Certificate.Chain, "compromised_spki_policy_version") or
+                std.crypto.Certificate.Chain.compromised_spki_policy_version < 20261021)))
+        @compileError("Hutch requires its native TLS security policy; run bash scripts/setup.sh and use vendors/zig/zig");
+}
+
 pub fn build(b: *std.Build) void {
     // Release artifacts must run on baseline hardware. Keep the default
     // conservative as a second line of defense behind the release command's

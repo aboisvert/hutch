@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const file_locks = @import("file_locks.zig");
 const store_locks = @import("store_locks.zig");
 const release_store = @import("release_store.zig");
+const zig_tls_patch = @import("zig_tls_patch.zig");
 
 const max_archive_bytes = 1536 * 1024 * 1024;
 
@@ -151,6 +152,9 @@ fn systemResolution(
     kind: Kind,
     version: []const u8,
 ) !?Resolution {
+    // The current compiler must carry our native TLS revocation policy. Use a
+    // private managed install rather than changing an unrelated PATH compiler.
+    if (kind == .zig and std.mem.eql(u8, version, zig_tls_patch.version)) return null;
     const executable_matches = try systemExecutableMatchesVersion(
         init.io,
         allocator,
@@ -189,6 +193,12 @@ fn resolveManagedVersionUnderGraph(
         version,
     );
     if (initial_state == .valid) {
+        if (kind == .zig and std.mem.eql(u8, version, zig_tls_patch.version)) {
+            const lock_path = try std.mem.concat(allocator, u8, &.{ root, ".lock" });
+            const lock = try release_store.acquirePersistentFileLock(init.io, lock_path);
+            defer lock.close(init.io);
+            try zig_tls_patch.apply(init.io, allocator, root);
+        }
         return leaseManagedResolutionUnderGraph(init.io, allocator, home, .{
             .binary = binary,
             .root = root,
@@ -218,6 +228,8 @@ fn resolveAfterInstalledMiss(
 
     const locked_state = try installedToolchainState(init.io, allocator, root, binary, kind, version);
     if (locked_state == .valid) {
+        if (kind == .zig and std.mem.eql(u8, version, zig_tls_patch.version))
+            try zig_tls_patch.apply(init.io, allocator, root);
         lock.close(init.io);
         lock_open = false;
         return leaseManagedResolutionUnderGraph(init.io, allocator, home, .{
@@ -388,6 +400,8 @@ fn publishInstalledToolchain(
     }
 
     const marker = try std.fs.path.join(allocator, &.{ temporary, ".hutch-toolchain" });
+    if (kind == .zig and std.mem.eql(u8, version, zig_tls_patch.version))
+        try zig_tls_patch.apply(io, allocator, temporary);
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = marker, .data = version });
     std.Io.Dir.cwd().deleteTree(io, root) catch {};
     try renameWithWindowsRetries(io, std.Io.Dir.cwd(), temporary, std.Io.Dir.cwd(), root);
