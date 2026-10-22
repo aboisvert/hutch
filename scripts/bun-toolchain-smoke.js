@@ -101,6 +101,12 @@ try {
   assert.equal(reused.status, 0, reused.stderr || reused.stdout);
   assert.equal(reused.stdout.trim(), pinned);
 
+  const security = spawnSync(managed, [join(hutchRoot, "scripts", "bun-tls-security-smoke.mjs")], {
+    cwd: project, encoding: "utf8", env, timeout: 30_000,
+  });
+  assert.equal(security.status, 0, security.stderr || security.stdout);
+  process.stdout.write(security.stdout);
+
   console.log(`OK bun ${pinned} vendored from upstream for ${platformKey}`);
   console.log(`OK managed install reused at ${managed}`);
 } finally {

@@ -8,7 +8,7 @@ const max_archive_bytes = 1536 * 1024 * 1024;
 
 // Hutch's pinned script runtime, also used by generic packageManager: "bun"
 // projects. Electrobun package-manager selection can use its devkit's Bun pin.
-pub const default_bun_version = "1.4.0";
+pub const default_bun_version = "1.4.4";
 
 pub const Kind = enum {
     zig,
