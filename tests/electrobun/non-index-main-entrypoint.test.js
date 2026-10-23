@@ -813,10 +813,12 @@ test("floating Electrobun packageManager bun follows npm default, projection, th
       },
     });
     assert.equal(generic.status, 1, generic.stderr || generic.stdout);
-    assert.match(
-      generic.stderr,
-      /bun 1\.4\.0 is not installed/,
-      "a generic Bun project must retain Hutch's default instead of loading an Electrobun devkit",
+    const defaultBunVersion = readFileSync(join(hutchRoot, "src", "toolchain_store.zig"), "utf8")
+      .match(/default_bun_version = "([^"]+)"/)?.[1];
+    assert.ok(defaultBunVersion, "Hutch must declare its default Bun version");
+    assert.ok(
+      generic.stderr.includes(`bun ${defaultBunVersion} is not installed`),
+      `a generic Bun project must retain Hutch's default ${defaultBunVersion} instead of loading an Electrobun devkit; stderr: ${generic.stderr}`,
     );
     assert.equal(channelRequests, 1, "generic Bun projects must not query Electrobun channels");
   } finally {
