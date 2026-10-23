@@ -294,6 +294,12 @@ pub fn load(
         .nim = try optionalNativeSdkPaths(io, allocator, core_root, sdks, "nim"),
     };
 
+    // A Nim toolchain without its SDK (or the reverse) would load but fail
+    // later during projection or preflight with a less actionable error.
+    if ((toolchain_versions.nim == null) != (sdk_paths.nim == null)) {
+        return error.InvalidElectrobunDevkitManifest;
+    }
+
     return .{
         .root = core_root,
         .version = manifest_version,
@@ -1395,6 +1401,53 @@ test "v2 devkit rejects unsupported Nim toolchain versions" {
     try std.testing.expectError(
         error.UnsupportedElectrobunNimVersion,
         load(io, arena.allocator(), root, "2.0.0"),
+    );
+}
+
+test "v2 devkit requires Nim toolchain and SDK entries together" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const root = try createTestDevkit(io, allocator, &tmp, "2.0.0");
+    try tmp.dir.createDirPath(io, "nim-sdk");
+    try tmp.dir.writeFile(io, .{ .sub_path = "nim-sdk/electrobun.nim", .data = "# stub\n" });
+
+    const manifest_path = try std.fs.path.join(allocator, &.{ root, manifest_file_name });
+    const manifest_source = try std.Io.Dir.cwd().readFileAlloc(
+        io,
+        manifest_path,
+        allocator,
+        .limited(max_manifest_bytes),
+    );
+
+    const with_toolchain_only = try std.mem.replaceOwned(
+        u8,
+        allocator,
+        manifest_source,
+        "    \"bun\": { \"defaultVersion\": \"1.4.0\" },",
+        "    \"bun\": { \"defaultVersion\": \"1.4.0\" },\n    \"nim\": { \"defaultVersion\": \"2.2.12\" },",
+    );
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = manifest_path, .data = with_toolchain_only });
+    try std.testing.expectError(
+        error.InvalidElectrobunDevkitManifest,
+        load(io, allocator, root, "2.0.0"),
+    );
+
+    const with_sdk_only = try std.mem.replaceOwned(
+        u8,
+        allocator,
+        manifest_source,
+        "        \"collectionName\": \"electrobun_sdk\"\n      }",
+        "        \"collectionName\": \"electrobun_sdk\"\n      },\n      \"nim\": { \"root\": \"nim-sdk\", \"entrypoint\": \"nim-sdk/electrobun.nim\" }",
+    );
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = manifest_path, .data = with_sdk_only });
+    try std.testing.expectError(
+        error.InvalidElectrobunDevkitManifest,
+        load(io, allocator, root, "2.0.0"),
     );
 }
 
