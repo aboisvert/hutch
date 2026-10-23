@@ -2085,6 +2085,7 @@ pub fn fetchBytes(
         .keep_alive = builtin.os.tag != .windows,
     });
     const status: u16 = @intFromEnum(result.status);
+    if (status == 404) return error.ReleaseDownloadNotFound;
     if (status < 200 or status >= 300) return error.ReleaseDownloadFailed;
     if (output.written().len > max_bytes) return error.ReleaseDownloadTooLarge;
     return output.toOwnedSlice();

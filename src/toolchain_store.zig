@@ -258,12 +258,13 @@ fn resolveAfterInstalledMiss(
     );
     const bytes = release_store.fetchBytes(init, allocator, archive.url, max_archive_bytes) catch |err| {
         // nim-lang.org/download only hosts prebuilt archives for the most
-        // recent Nim releases, so older (or never-published) pins 404 here.
-        // Re-throw the original error; the note just explains why.
-        if (kind == .nim) {
+        // recent Nim releases, so older (or never-published) pins 404 there.
+        // Only explain that on a missing archive; transient or server errors
+        // should surface unchanged.
+        if (kind == .nim and err == error.ReleaseDownloadNotFound) {
             std.debug.print(
-                "hutch: nim-lang.org/download only hosts binary archives for recent Nim releases; nim {s} may not be downloadable at {s}. Consider pinning a currently published version (e.g. 2.2.x) or check https://nim-lang.org/download/.\n",
-                .{ version, archive.url },
+                "hutch: Nim {s} is not available at {s}; nim-lang.org only publishes binary archives for recent Nim releases. Pin a currently published version or install Nim {s} on PATH.\n",
+                .{ version, archive.url, version },
             );
         }
         return err;
