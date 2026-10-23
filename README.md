@@ -342,6 +342,12 @@ application for component roots, reads the exact runtime release's
 closure. The selected JavaScript package manager never resolves those private
 runtime components.
 
+Native main processes have their own compiler prerequisites. Odin and Nim
+builds on Windows use MSVC (`--cc:vcc`) and require `cl.exe` and `link.exe` from
+Visual Studio Build Tools. Nim main processes require Nim 2.0 or newer; managed
+Nim downloads come from nim-lang.org, which only publishes archives for recent
+releases.
+
 For development against an unpublished local core, set
 `HUTCH_ELECTROBUN_DEVKIT_ROOT` to its absolute directory containing the exact
 version/host `native-devkit.json`. Local syncs always refresh the facade so SDK
@@ -445,8 +451,8 @@ push `main` and the release tag.
 The GitHub Actions matrix builds macOS ARM64, Linux x64/ARM64, and Windows x64/ARM64.
 Windows ARM64 uses the native ARM64 Zig 0.17 compiler and runs the resulting
 ARM64 binaries and tests natively. Projects pinned to older Zig versions retain
-their x64 compiler fallback. Odin main-process builds are unavailable on Windows
-ARM64.
+their x64 compiler fallback. Odin and Nim main-process builds are unavailable on
+Windows ARM64.
 It uploads one archive per revision and platform:
 
 ```text
