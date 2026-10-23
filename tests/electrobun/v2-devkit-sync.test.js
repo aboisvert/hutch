@@ -462,6 +462,143 @@ export default {
   },
 );
 
+test(
+  "concurrent cold Nim toolchain resolution survives a crashed publisher",
+  { timeout: 120_000, skip: process.platform === "win32" },
+  async () => {
+    const fixture = mkdtempSync(join(os.tmpdir(), "hutch-v2-nim-toolchain-race-"));
+    const project = join(fixture, "project");
+    const coreFiles = join(fixture, "core-files");
+    const dashHome = join(fixture, "dash-home");
+    const host = hostContract();
+    const electrobunVersion = "2.0.0-test.nim-toolchain-race.1";
+    const nimVersion = "2099.1.1";
+    const hutch = join(hutchRoot, "zig-out", "bin", executableName("hutch"));
+    const engine = join(hutchRoot, "zig-out", "bin", executableName("hutch-engine"));
+    const cottontail = resolveCottontail();
+    const proxySockets = new Set();
+    let proxyRequests = 0;
+    let resolveProxyRequest;
+    const firstProxyRequest = new Promise((resolveRequest) => { resolveProxyRequest = resolveRequest; });
+    const proxy = createServer((_request, _response) => {
+      proxyRequests += 1;
+      resolveProxyRequest();
+    });
+    proxy.on("connect", (_request, socket) => {
+      proxyRequests += 1;
+      proxySockets.add(socket);
+      socket.on("close", () => proxySockets.delete(socket));
+      resolveProxyRequest();
+    });
+
+    let holder;
+    try {
+      createCoreFixture(coreFiles, electrobunVersion, host, { includeNim: true });
+      writeFixtureFile(join(project, "src", "nim", "main.nim"), "echo \"stub\"\n");
+      writeFixtureFile(join(project, "electrobun.config.ts"), `
+export default {
+  app: { name: "NimToolchainRace", identifier: "dev.electrobun.nim-toolchain-race", version: "0.0.0" },
+  build: {
+    mainProcess: "nim",
+    nim: { entrypoint: "src/nim/main.nim", version: "${nimVersion}" },
+    mac: { icons: null, codesign: false, notarize: false, bundleCEF: false, bundleWGPU: false },
+    win: { bundleCEF: false, bundleWGPU: false },
+    linux: { bundleCEF: false, bundleWGPU: false },
+  },
+};
+`);
+      writeFixtureFile(
+        join(project, "hutch.config.ts"),
+        `export default { electrobun: { version: "${electrobunVersion}" } };\n`,
+      );
+
+      await new Promise((resolveListen) => proxy.listen(0, "127.0.0.1", resolveListen));
+      const proxyAddress = proxy.address();
+      assert.ok(proxyAddress && typeof proxyAddress === "object");
+      const proxyUrl = `http://127.0.0.1:${proxyAddress.port}`;
+      const env = {
+        ...process.env,
+        COTTONTAIL_BINARY: cottontail,
+        DASH_COTTONTAIL: cottontail,
+        DASH_HOME: dashHome,
+        HUTCH_ELECTROBUN_DEVKIT_ROOT: coreFiles,
+        HUTCH_ENGINE_BINARY: engine,
+        HUTCH_NO_UPDATE_CHECK: "1",
+        HTTPS_PROXY: proxyUrl,
+        https_proxy: proxyUrl,
+        NO_PROXY: "",
+        no_proxy: "",
+      };
+
+      holder = startRun(hutch, ["electrobun", "sync"], {
+        cwd: project,
+        env,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      await waitFor(
+        firstProxyRequest,
+        15_000,
+        "the first cold Nim toolchain resolver did not reach the blocking proxy",
+      );
+      assert.equal(holder.child.kill("SIGSTOP"), true);
+
+      let completedWaiters = 0;
+      const waiters = Array.from({ length: 8 }, () =>
+        run(hutch, ["electrobun", "sync"], {
+          cwd: project,
+          env,
+          stdio: ["ignore", "pipe", "pipe"],
+        }).then((result) => {
+          completedWaiters += 1;
+          return result;
+        }));
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 1_000));
+      assert.equal(completedWaiters, 0, "cold waiters must remain behind the held toolchain lock");
+      assert.equal(proxyRequests, 1, "blocked waiters must not start duplicate downloads");
+
+      const toolchainRoot = join(dashHome, "toolchains", "nim", nimVersion, host.key);
+      mkdirSync(join(toolchainRoot, "bin"), { recursive: true });
+      const nim = join(toolchainRoot, "bin", "nim");
+      writeFileSync(
+        nim,
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'Nim Compiler Version 2099.1.1 [MacOSX: arm64]'; exit 0; fi\nexit 0\n",
+      );
+      chmodSync(nim, 0o755);
+      writeFileSync(join(toolchainRoot, ".hutch-toolchain"), `${nimVersion}\n`);
+
+      assert.equal(holder.child.kill("SIGKILL"), true);
+      const crashed = await holder.result;
+      assert.equal(crashed.signal, "SIGKILL");
+      const results = await Promise.all(waiters);
+      for (const result of results) {
+        assert.equal(result.status, 0, result.stderr || result.stdout);
+        assert.match(result.stdout, /electrobun sync complete/);
+      }
+      assert.equal(proxyRequests, 1, "waiters must recheck the installed toolchain instead of downloading");
+      assert.ok(existsSync(join(project, ".hutch", "devkit", "nim-sdk", "electrobun.nim")));
+      assert.ok(existsSync(`${toolchainRoot}.lock`));
+      assert.equal(
+        readFileSync(join(toolchainRoot, ".hutch-toolchain"), "utf8").trim(),
+        nimVersion,
+      );
+      assert.match(
+        readFileSync(join(project, ".hutch", "dependencies.lock"), "utf8"),
+        new RegExp(`toolchains/nim/${nimVersion}/${host.key}`),
+      );
+    } finally {
+      if (holder?.child.exitCode == null && holder?.child.signalCode == null) {
+        holder.child.kill("SIGKILL");
+        await holder.result.catch(() => {});
+      }
+      for (const socket of proxySockets) socket.destroy();
+      if (proxy.listening) {
+        await new Promise((resolveClose) => proxy.close(resolveClose));
+      }
+      rmSync(fixture, { recursive: true, force: true });
+    }
+  },
+);
+
 test("v2 Rust builds use the project Cargo manifest and lock without npm", { timeout: 120_000 }, async () => {
   const rustc = spawnSync("rustc", ["--version"], { encoding: "utf8" });
   const cargo = spawnSync("cargo", ["--version"], { encoding: "utf8" });

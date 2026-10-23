@@ -26,6 +26,7 @@ const MainProcess = enum {
     rust,
     go,
     odin,
+    nim,
 };
 
 const BuildEnvironment = enum {
@@ -651,7 +652,7 @@ fn loadConfig(ctx: *const Context, build_env: BuildEnvironment) !CommandContext 
     };
     _ = getMainProcess(parsed) catch |err| {
         ctx.writeStderr(
-            "hutch electrobun: build.mainProcess must be bun, cottontail, zig, rust, go, or odin\n",
+            "hutch electrobun: build.mainProcess must be bun, cottontail, zig, rust, go, odin, or nim\n",
             .{},
         );
         return err;
@@ -783,6 +784,7 @@ fn prepareProject(ctx: *const Context, config: CommandContext) !void {
             }
         },
         .odin => try appendManagedToolchain(ctx, &objects, .odin, try resolveBuildToolchainUnderGraph(ctx, config.root, platform_paths, .odin)),
+        .nim => try appendManagedToolchain(ctx, &objects, .nim, try resolveBuildToolchainUnderGraph(ctx, config.root, platform_paths, .nim)),
         .bun => {
             const devkit = platform_paths.devkit orelse return error.ElectrobunDevkitNotResolved;
             // Historical schema-1 devkits carry their exact Bun executable
@@ -1070,7 +1072,7 @@ fn runBuildUnlocked(ctx: *const Context, config: CommandContext) !void {
 
     const main_process = try getMainProcess(config.root);
     switch (main_process) {
-        .bun, .cottontail, .zig, .rust, .go, .odin => try buildBundledElectrobunApp(ctx, config),
+        .bun, .cottontail, .zig, .rust, .go, .odin, .nim => try buildBundledElectrobunApp(ctx, config),
     }
 
     if (config.build_env == .dev) {
@@ -3295,7 +3297,7 @@ fn runBuiltApp(
 ) !void {
     const main_process = try getMainProcess(config.root);
     switch (main_process) {
-        .bun, .cottontail, .zig, .rust, .go, .odin => {
+        .bun, .cottontail, .zig, .rust, .go, .odin, .nim => {
             var running = try spawnBuiltAppWithReadLease(ctx, config, inspector);
             try waitForBuiltApp(ctx, &running);
         },
@@ -3936,6 +3938,7 @@ fn resolveBuildToolchainWithMode(
         .rust => devkit.toolchains.rust,
         .go => devkit.toolchains.go,
         .odin => devkit.toolchains.odin,
+        .nim => devkit.toolchains.nim orelse return error.NimNotSupportedByElectrobunRelease,
         .bun => devkit.toolchains.bun,
     };
     const version = try configuredToolchainVersion(config_root, kind, default_version);
@@ -4020,6 +4023,25 @@ fn prepareZigBuildEnvironment(ctx: *const Context, env_map: *std.process.Environ
     }) |name| {
         _ = env_map.swapRemove(name);
     }
+}
+
+fn prependToolchainBinToPath(
+    allocator: std.mem.Allocator,
+    env_map: *std.process.Environ.Map,
+    toolchain_root: []const u8,
+) !void {
+    const toolchain_bin = try std.fs.path.join(allocator, &.{ toolchain_root, "bin" });
+    const path_key = if (builtin.os.tag == .windows) "Path" else "PATH";
+    const existing_path = env_map.get(path_key) orelse env_map.get("PATH") orelse "";
+    const joined_path = if (existing_path.len == 0)
+        toolchain_bin
+    else
+        try std.fmt.allocPrint(
+            allocator,
+            "{s}{c}{s}",
+            .{ toolchain_bin, std.fs.path.delimiter, existing_path },
+        );
+    try env_map.put(path_key, joined_path);
 }
 
 test "Rust toolchain overrides are exact semantic versions" {
@@ -4528,18 +4550,7 @@ fn buildRustMainExecutable(ctx: *const Context, config: CommandContext, platform
     try env_map.put("CARGO_TARGET_DIR", cargo_target_dir);
     try pinRustCompilerEnvironment(&env_map, rust_toolchain.binary);
     if (rust_toolchain.root) |toolchain_root| {
-        const toolchain_bin = try std.fs.path.join(ctx.allocator, &.{ toolchain_root, "bin" });
-        const path_key = if (builtin.os.tag == .windows) "Path" else "PATH";
-        const existing_path = env_map.get(path_key) orelse env_map.get("PATH") orelse "";
-        const rust_path = if (existing_path.len == 0)
-            toolchain_bin
-        else
-            try std.fmt.allocPrint(
-                ctx.allocator,
-                "{s}{c}{s}",
-                .{ toolchain_bin, std.fs.path.delimiter, existing_path },
-            );
-        try env_map.put(path_key, rust_path);
+        try prependToolchainBinToPath(ctx.allocator, &env_map, toolchain_root);
     }
     if (builtin.os.tag == .macos) try env_map.put("MACOSX_DEPLOYMENT_TARGET", "14.0");
 
@@ -5192,6 +5203,106 @@ fn buildOdinMainExecutable(ctx: *const Context, config: CommandContext, platform
     return odin_out_bin;
 }
 
+fn buildNimMainExecutable(ctx: *const Context, config: CommandContext, platform_paths: PlatformPaths, bundle: AppBundlePaths) ![]const u8 {
+    if (builtin.os.tag == .windows and builtin.cpu.arch == .aarch64) {
+        ctx.writeStderr("hutch electrobun: Nim main processes are not supported on Windows ARM64\n", .{});
+        return error.NimWindowsArm64Unsupported;
+    }
+    const devkit = platform_paths.devkit orelse return error.ElectrobunDevkitNotResolved;
+    if (devkit.toolchains.nim == null) {
+        ctx.writeStderr("hutch electrobun: this Electrobun release does not include Nim support\n", .{});
+        return error.NimNotSupportedByElectrobunRelease;
+    }
+
+    const leased_nim_toolchain = try resolveBuildToolchain(ctx, config.root, platform_paths, .nim);
+    defer leased_nim_toolchain.close(ctx.io);
+    const nim_toolchain = leased_nim_toolchain.resolution;
+    const nim_binary = nim_toolchain.binary;
+
+    const projection = platform_paths.projection orelse return error.ElectrobunDevkitNotProjected;
+    const nim_sdk_path = projection.nim_sdk_path orelse {
+        ctx.writeStderr("hutch electrobun: this Electrobun release does not include the Nim SDK\n", .{});
+        return error.NimSdkNotFound;
+    };
+    const nim_sdk_entrypoint = projection.nim_entrypoint orelse return error.NimSdkNotFound;
+    if (!pathExists(ctx.io, nim_sdk_entrypoint)) return error.NimSdkNotFound;
+
+    const entrypoint = try resolveMainEntrypoint(ctx, config.root, .nim);
+    if (!pathExists(ctx.io, entrypoint)) return error.NimEntrypointNotFound;
+
+    const temp_build_dir = try std.fs.path.join(ctx.allocator, &.{ bundle.build_root, ".electrobun-nim-main", try std.fmt.allocPrint(ctx.allocator, "{s}-{s}", .{ osName(), archName() }) });
+    try createOutputDirWithin(ctx, bundle.build_root, temp_build_dir);
+    const nimcache = try std.fs.path.join(ctx.allocator, &.{ temp_build_dir, "nimcache" });
+    try createOutputDirWithin(ctx, temp_build_dir, nimcache);
+    const nim_out_bin = try std.fs.path.join(ctx.allocator, &.{ temp_build_dir, executableFileName("main") });
+
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(ctx.allocator);
+    try argv.append(ctx.allocator, nim_binary);
+    try appendNimBuildArguments(ctx.allocator, &argv, config.build_env, nimcache, nim_sdk_path, nim_out_bin);
+    if (builtin.os.tag == .macos) {
+        try argv.append(ctx.allocator, "--passL:-mmacosx-version-min=14.0");
+    }
+    try argv.append(ctx.allocator, entrypoint);
+
+    var env_map = std.process.Environ.Map.init(ctx.allocator);
+    defer env_map.deinit();
+    try inheritCurrentEnvironmentFromContext(ctx, &env_map);
+    if (nim_toolchain.root) |toolchain_root| {
+        try prependToolchainBinToPath(ctx.allocator, &env_map, toolchain_root);
+    }
+    if (builtin.os.tag == .macos) try env_map.put("MACOSX_DEPLOYMENT_TARGET", "14.0");
+
+    const result = try std.process.run(ctx.allocator, ctx.io, .{
+        .argv = argv.items,
+        .cwd = .{ .path = ctx.project_root },
+        .environ_map = &env_map,
+        .create_no_window = true,
+    });
+    defer ctx.allocator.free(result.stdout);
+    defer ctx.allocator.free(result.stderr);
+
+    if (termExitCode(result.term) != 0) {
+        if (result.stdout.len > 0) ctx.writeStdout("{s}", .{result.stdout});
+        if (result.stderr.len > 0) ctx.writeStderr("{s}", .{result.stderr});
+        if (builtin.os.tag == .windows) {
+            ctx.writeStderr("Nim on Windows requires link.exe from Visual Studio Build Tools.\n", .{});
+        }
+        return error.NimBuildFailed;
+    }
+
+    if (!pathExists(ctx.io, nim_out_bin)) return error.NimMainBinaryNotFound;
+    return nim_out_bin;
+}
+
+fn appendNimBuildArguments(
+    allocator: std.mem.Allocator,
+    argv: *std.ArrayList([]const u8),
+    build_env: BuildEnvironment,
+    nimcache: []const u8,
+    nim_sdk_path: []const u8,
+    out_bin: []const u8,
+) !void {
+    // User-global Nim config is skipped to keep builds hermetic (a PATH Nim or
+    // version-manager shim could inject flags), but parent/project nim.cfg
+    // files are honored so projects can ship their own flags. Command-line
+    // arguments take precedence over config files in Nim, so the explicit
+    // -o: below still wins over an output path a project nim.cfg might set.
+    try argv.appendSlice(allocator, &.{
+        "c",
+        "--threads:on",
+        "--mm:orc",
+        "--verbosity:0",
+        "--skipUserCfg",
+        try std.fmt.allocPrint(allocator, "--nimcache:{s}", .{nimcache}),
+        try std.fmt.allocPrint(allocator, "--path:{s}", .{nim_sdk_path}),
+        try std.fmt.allocPrint(allocator, "-o:{s}", .{out_bin}),
+    });
+    if (build_env != .dev) {
+        try argv.append(allocator, "--define:release");
+    }
+}
+
 fn odinMainStackLinkerArg(os_tag: std.Target.Os.Tag) ?[]const u8 {
     // link.exe's 1 MiB default is easy for a native Odin host with a large
     // dispatcher to exhaust. Reserving virtual address space is cheap on x64
@@ -5216,6 +5327,49 @@ test "macOS Odin main arguments pin deployment and generic CPU compatibility" {
     try std.testing.expectEqualStrings("-microarch:generic", args[1]);
     try std.testing.expectEqual(@as(usize, 0), odinMainPlatformArguments(.linux).len);
     try std.testing.expectEqual(@as(usize, 0), odinMainPlatformArguments(.windows).len);
+}
+
+test "Nim main arguments skip only the user config and honor release mode" {
+    const helper = struct {
+        fn hasArg(list: []const []const u8, needle: []const u8) bool {
+            for (list) |item| {
+                if (std.mem.eql(u8, item, needle)) return true;
+            }
+            return false;
+        }
+        // The helper allocates the formatted flags; the static literals are
+        // not owned here, so only arguments with these prefixes are freed.
+        fn freeFormatted(allocator: std.mem.Allocator, list: []const []const u8) void {
+            for (list) |item| {
+                if (std.mem.startsWith(u8, item, "--nimcache:") or
+                    std.mem.startsWith(u8, item, "--path:") or
+                    std.mem.startsWith(u8, item, "-o:"))
+                {
+                    allocator.free(item);
+                }
+            }
+        }
+    };
+
+    var release_argv: std.ArrayList([]const u8) = .empty;
+    var dev_argv: std.ArrayList([]const u8) = .empty;
+    defer release_argv.deinit(std.testing.allocator);
+    defer dev_argv.deinit(std.testing.allocator);
+    defer helper.freeFormatted(std.testing.allocator, release_argv.items);
+    defer helper.freeFormatted(std.testing.allocator, dev_argv.items);
+
+    try appendNimBuildArguments(std.testing.allocator, &release_argv, .canary, "/nimcache", "/nim/sdk", "/out/main");
+    try std.testing.expect(helper.hasArg(release_argv.items, "--skipUserCfg"));
+    try std.testing.expect(!helper.hasArg(release_argv.items, "--skipParentCfg"));
+    try std.testing.expect(helper.hasArg(release_argv.items, "--nimcache:/nimcache"));
+    try std.testing.expect(helper.hasArg(release_argv.items, "--path:/nim/sdk"));
+    try std.testing.expect(helper.hasArg(release_argv.items, "-o:/out/main"));
+    try std.testing.expect(helper.hasArg(release_argv.items, "--define:release"));
+
+    try appendNimBuildArguments(std.testing.allocator, &dev_argv, .dev, "/nimcache", "/nim/sdk", "/out/main");
+    try std.testing.expect(helper.hasArg(dev_argv.items, "--skipUserCfg"));
+    try std.testing.expect(!helper.hasArg(dev_argv.items, "--skipParentCfg"));
+    try std.testing.expect(!helper.hasArg(dev_argv.items, "--define:release"));
 }
 
 test "Windows Odin main processes reserve an eight MiB stack" {
@@ -5347,6 +5501,10 @@ fn buildBundledElectrobunApp(ctx: *const Context, config: CommandContext) !void 
         },
         .odin => {
             const main_binary = try buildOdinMainExecutable(ctx, config, platform_paths, bundle);
+            try copyPath(ctx, main_binary, try std.fs.path.join(ctx.allocator, &.{ bundle.exec_dir, executableFileName("main") }));
+        },
+        .nim => {
+            const main_binary = try buildNimMainExecutable(ctx, config, platform_paths, bundle);
             try copyPath(ctx, main_binary, try std.fs.path.join(ctx.allocator, &.{ bundle.exec_dir, executableFileName("main") }));
         },
         .cottontail => {
@@ -5957,7 +6115,7 @@ fn spawnBuiltApp(
     inspector: ?MainProcessInspector,
 ) !std.process.Child {
     return switch (try getMainProcess(config.root)) {
-        .bun, .cottontail, .zig, .rust, .go, .odin => |main_process| blk: {
+        .bun, .cottontail, .zig, .rust, .go, .odin, .nim => |main_process| blk: {
             const bundle = try appBundlePaths(ctx, config);
             const launcher_path = try std.fs.path.join(ctx.allocator, &.{ bundle.exec_dir, launcherFileName() });
             if (!pathExists(ctx.io, launcher_path)) return error.BuiltMainNotFound;
@@ -6069,7 +6227,7 @@ fn buildMainEntrypoint(
     const options = switch (main_process) {
         .cottontail => getObjectFieldFromObject(build, "cottontail") orelse getObjectFieldFromObject(build, "main") orelse getObjectFieldFromObject(build, "bun"),
         .bun => getObjectFieldFromObject(build, "bun") orelse std.json.ObjectMap.empty,
-        .zig, .rust, .go, .odin => null,
+        .zig, .rust, .go, .odin, .nim => null,
     } orelse return error.InvalidConfig;
 
     const entry_path = source_path;
@@ -6562,6 +6720,12 @@ fn resolveMainEntrypoint(ctx: *const Context, root: std.json.Value, main_process
             }
             break :blk "src/odin/main.odin";
         },
+        .nim => blk: {
+            if (getObjectFieldFromObject(build, "nim")) |object| {
+                if (getStringFieldFromObject(object, "entrypoint")) |path| break :blk path;
+            }
+            break :blk "src/nim/main.nim";
+        },
     };
 
     return absoluteProjectPath(ctx, relative);
@@ -6930,6 +7094,7 @@ fn mainProcessName(main_process: MainProcess) []const u8 {
         .rust => "rust",
         .go => "go",
         .odin => "odin",
+        .nim => "nim",
     };
 }
 
@@ -7381,14 +7546,14 @@ fn windowsMainProcessExecutableName(main_process: MainProcess) []const u8 {
     return switch (main_process) {
         .bun => "bun.exe",
         .cottontail => "cottontail.exe",
-        .zig, .rust, .go, .odin => "main.exe",
+        .zig, .rust, .go, .odin, .nim => "main.exe",
     };
 }
 
 test "Windows icon embedding covers every main-process executable" {
     try std.testing.expectEqualStrings("bun.exe", windowsMainProcessExecutableName(.bun));
     try std.testing.expectEqualStrings("cottontail.exe", windowsMainProcessExecutableName(.cottontail));
-    inline for (.{ MainProcess.zig, MainProcess.rust, MainProcess.go, MainProcess.odin }) |main_process| {
+    inline for (.{ MainProcess.zig, MainProcess.rust, MainProcess.go, MainProcess.odin, MainProcess.nim }) |main_process| {
         try std.testing.expectEqualStrings("main.exe", windowsMainProcessExecutableName(main_process));
     }
 }
@@ -8312,7 +8477,7 @@ fn cefHelperBaseName(main_process: MainProcess) []const u8 {
         .bun => "bun",
         .cottontail => "cottontail",
         .zig => "main",
-        .rust, .go, .odin => "main",
+        .rust, .go, .odin, .nim => "main",
     };
 }
 
@@ -9060,7 +9225,7 @@ test "Electrobun accepts every supported main process and defaults to Bun" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    inline for (.{ "bun", "cottontail", "zig", "rust", "go", "odin" }) |name| {
+    inline for (.{ "bun", "cottontail", "zig", "rust", "go", "odin", "nim" }) |name| {
         const source = try std.fmt.allocPrint(
             arena.allocator(),
             \\{{"build":{{"mainProcess":"{s}"}}}}

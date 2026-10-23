@@ -254,7 +254,7 @@ test("v2 Electrobun rejects invalid main processes without falling back to Bun",
   const cottontail = resolveCottontail();
   const coreRoot = join(fixture, "core");
   createCoreFixture(coreRoot, "2.0.0-test.1");
-  const diagnostic = "hutch electrobun: build.mainProcess must be bun, cottontail, zig, rust, go, or odin\n";
+  const diagnostic = "hutch electrobun: build.mainProcess must be bun, cottontail, zig, rust, go, odin, or nim\n";
 
   try {
     for (const value of ['"bnu"', "42"]) {

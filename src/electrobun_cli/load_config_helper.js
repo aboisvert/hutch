@@ -36,6 +36,9 @@ const defaultConfig = {
     odin: {
       entrypoint: "src/odin/main.odin",
     },
+    nim: {
+      entrypoint: "src/nim/main.nim",
+    },
     mac: {
       codesign: false,
       createDmg: true,

@@ -51,7 +51,7 @@ export function hostContract() {
   };
 }
 
-export function createCoreFixture(root, version, host = hostContract()) {
+export function createCoreFixture(root, version, host = hostContract(), options = {}) {
   const runtime = {
     main: "main.js",
     preloadFull: "preload-full.js",
@@ -109,9 +109,20 @@ export function createCoreFixture(root, version, host = hostContract()) {
           collection: "odin-sdk",
           collectionName: "electrobun_sdk",
         },
+        ...(options.includeNim
+          ? {
+              nim: {
+                root: "nim-sdk",
+                entrypoint: "nim-sdk/electrobun.nim",
+              },
+            }
+          : {}),
       },
     },
   };
+  if (options.includeNim) {
+    manifest.toolchains.nim = { defaultVersion: "2.2.12" };
+  }
 
   const { wgpuAuxiliaryLibraries, ...runtimeFiles } = runtime;
   for (const file of new Set([
@@ -131,6 +142,9 @@ export function createCoreFixture(root, version, host = hostContract()) {
   writeFixtureFile(join(root, "go-sdk", "go.mod"), "module electrobun\n\ngo 1.26\n");
   writeFixtureFile(join(root, "go-sdk", "electrobun.go"), "package electrobun\n");
   writeFixtureFile(join(root, "odin-sdk", "electrobun", "electrobun.odin"), "package electrobun\n");
+  if (options.includeNim) {
+    writeFixtureFile(join(root, "nim-sdk", "electrobun.nim"), "# nim sdk stub\n");
+  }
   writeFixtureFile(join(root, "native-devkit.json"), `${JSON.stringify(manifest, null, 2)}\n`);
   return manifest;
 }

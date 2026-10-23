@@ -13,12 +13,14 @@ const projected_zig_root = "zig-sdk";
 const projected_rust_root = "rust-sdk";
 const projected_go_root = "go-sdk";
 const projected_odin_root = "odin-sdk";
+const projected_nim_root = "nim-sdk";
 
 pub const ToolchainVersions = struct {
     zig: []const u8,
     rust: []const u8,
     go: []const u8,
     odin: []const u8,
+    nim: ?[]const u8 = null,
     bun: []const u8,
     /// The Cottontail runtime this Electrobun release bundles into apps with
     /// `mainProcess: "cottontail"` — an app runtime component like the
@@ -105,6 +107,7 @@ pub const SdkPaths = struct {
     rust: RustSdkPaths,
     go: GoSdkPaths,
     odin: OdinSdkPaths,
+    nim: ?NativeSdkPaths = null,
 };
 
 pub const Resolution = struct {
@@ -130,6 +133,8 @@ pub const Projection = struct {
     odin_root: []const u8,
     odin_entrypoint: []const u8,
     odin_collection: []const u8,
+    nim_sdk_path: ?[]const u8 = null,
+    nim_entrypoint: ?[]const u8 = null,
 };
 
 pub const ProjectOptions = struct {
@@ -233,6 +238,7 @@ pub fn load(
         .rust = try toolchainVersion(toolchains, "rust"),
         .go = try toolchainVersion(toolchains, "go"),
         .odin = try toolchainVersion(toolchains, "odin"),
+        .nim = try optionalToolchainVersion(toolchains, "nim"),
         .bun = if (has_managed_bun_toolchain)
             try toolchainVersion(toolchains, "bun")
         else
@@ -284,6 +290,7 @@ pub fn load(
         .rust = try rustSdkPaths(io, allocator, core_root, sdks),
         .go = try goSdkPaths(io, allocator, core_root, sdks),
         .odin = try odinSdkPaths(io, allocator, core_root, sdks),
+        .nim = try optionalNativeSdkPaths(io, allocator, core_root, sdks, "nim"),
     };
 
     return .{
@@ -333,20 +340,23 @@ pub fn project(
     try std.Io.Dir.cwd().createDirPath(io, temporary);
     errdefer std.Io.Dir.cwd().deleteTree(io, temporary) catch {};
 
-    const copy_roots = [_]struct { source: []const u8, relative: []const u8 }{
-        .{ .source = resolution.sdks.javascript.root, .relative = projected_api_root },
-        .{ .source = resolution.sdks.zig.root, .relative = projected_zig_root },
-        .{ .source = resolution.sdks.rust.root, .relative = projected_rust_root },
-        .{ .source = resolution.sdks.go.root, .relative = projected_go_root },
-        .{ .source = resolution.sdks.odin.collection, .relative = projected_odin_root },
+    const CopyRoot = struct { source: []const u8, relative: []const u8 };
+    const copy_roots = [_]?CopyRoot{
+        if (resolution.sdks.nim) |nim_sdk| CopyRoot{ .source = nim_sdk.root, .relative = projected_nim_root } else null,
+        CopyRoot{ .source = resolution.sdks.javascript.root, .relative = projected_api_root },
+        CopyRoot{ .source = resolution.sdks.zig.root, .relative = projected_zig_root },
+        CopyRoot{ .source = resolution.sdks.rust.root, .relative = projected_rust_root },
+        CopyRoot{ .source = resolution.sdks.go.root, .relative = projected_go_root },
+        CopyRoot{ .source = resolution.sdks.odin.collection, .relative = projected_odin_root },
     };
     for (copy_roots) |copy_root| {
-        try validateRelativePosixPath(copy_root.relative);
+        const root = copy_root orelse continue;
+        try validateRelativePosixPath(root.relative);
         try copyTree(
             io,
             allocator,
-            copy_root.source,
-            try std.fs.path.join(allocator, &.{ temporary, copy_root.relative }),
+            root.source,
+            try std.fs.path.join(allocator, &.{ temporary, root.relative }),
         );
     }
 
@@ -392,6 +402,14 @@ fn projectionPaths(
         .odin_root = try projectedAbsolutePath(allocator, root, projected_odin_root, resolution.sdks.odin.relative_collection, resolution.sdks.odin.relative_root),
         .odin_entrypoint = try projectedAbsolutePath(allocator, root, projected_odin_root, resolution.sdks.odin.relative_collection, resolution.sdks.odin.relative_entrypoint),
         .odin_collection = try std.fs.path.join(allocator, &.{ root, projected_odin_root }),
+        .nim_sdk_path = if (resolution.sdks.nim != null)
+            try std.fs.path.join(allocator, &.{ root, projected_nim_root })
+        else
+            null,
+        .nim_entrypoint = if (resolution.sdks.nim) |nim_sdk|
+            try projectedAbsolutePath(allocator, root, projected_nim_root, nim_sdk.relative_root, nim_sdk.relative_entrypoint)
+        else
+            null,
     };
 }
 
@@ -436,6 +454,14 @@ fn projectionMatches(
     }) |path| {
         if (!pathExists(io, path)) return false;
     }
+    if (resolution.sdks.nim != null) {
+        if (paths.nim_sdk_path) |nim_sdk_path| {
+            if (!pathExists(io, nim_sdk_path)) return false;
+        } else return false;
+        if (paths.nim_entrypoint) |nim_entrypoint| {
+            if (!pathExists(io, nim_entrypoint)) return false;
+        } else return false;
+    }
     return true;
 }
 
@@ -477,6 +503,11 @@ fn projectionIdentityMatches(
         .{ "odin", projected_odin_root },
     }) |field| {
         if (!std.mem.eql(u8, requiredString(sdks, field[0]) catch return false, field[1])) return false;
+    }
+    if (resolution.sdks.nim != null) {
+        if (!std.mem.eql(u8, requiredString(sdks, "nim") catch return false, projected_nim_root)) return false;
+    } else if (sdks.get("nim") != null) {
+        return false;
     }
     return true;
 }
@@ -565,6 +596,9 @@ fn writeProjectionMetadata(
     try sdks.put(allocator, "rust", .{ .string = projected_rust_root });
     try sdks.put(allocator, "go", .{ .string = projected_go_root });
     try sdks.put(allocator, "odin", .{ .string = projected_odin_root });
+    if (resolution.sdks.nim != null) {
+        try sdks.put(allocator, "nim", .{ .string = projected_nim_root });
+    }
     var layout: std.json.ObjectMap = .empty;
     try layout.put(allocator, "api", .{ .string = projected_api_root });
     try layout.put(allocator, "sdks", .{ .object = sdks });
@@ -739,6 +773,18 @@ fn validateExactOdinVersion(version: []const u8) !void {
     if (version.len == 12 and !std.ascii.isLower(version[11])) return error.InvalidElectrobunToolchainVersion;
 }
 
+fn optionalNativeSdkPaths(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    core_root: []const u8,
+    sdks: std.json.ObjectMap,
+    name: []const u8,
+) !?NativeSdkPaths {
+    const sdk_value = sdks.get(name) orelse return null;
+    if (sdk_value != .object) return error.InvalidElectrobunDevkitManifest;
+    return try nativeSdkPathsFromObject(io, allocator, core_root, sdk_value.object);
+}
+
 fn nativeSdkPaths(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -747,6 +793,15 @@ fn nativeSdkPaths(
     name: []const u8,
 ) !NativeSdkPaths {
     const sdk = try requiredObjectField(sdks, name);
+    return try nativeSdkPathsFromObject(io, allocator, core_root, sdk);
+}
+
+fn nativeSdkPathsFromObject(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    core_root: []const u8,
+    sdk: std.json.ObjectMap,
+) !NativeSdkPaths {
     const root = try requiredString(sdk, "root");
     const entrypoint = try requiredString(sdk, "entrypoint");
     return .{
@@ -1247,6 +1302,56 @@ test "package-free v2 devkit resolves runtime SDKs and toolchain defaults" {
     try std.testing.expect(std.mem.endsWith(u8, resolution.sdks.javascript.main, "api/sdks/main/index.ts"));
     try std.testing.expect(std.mem.endsWith(u8, resolution.sdks.go.root, "go-sdk"));
     try std.testing.expect(std.mem.endsWith(u8, resolution.sdks.odin.collection, "odin-sdk"));
+    try std.testing.expect(resolution.toolchains.nim == null);
+    try std.testing.expect(resolution.sdks.nim == null);
+}
+
+test "v2 devkit loads Nim toolchain and SDK when manifest includes them" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const root = try createTestDevkit(io, arena.allocator(), &tmp, "2.0.0");
+    try tmp.dir.createDirPath(io, "nim-sdk");
+    try tmp.dir.writeFile(io, .{ .sub_path = "nim-sdk/electrobun.nim", .data = "# stub\n" });
+
+    const manifest_path = try std.fs.path.join(arena.allocator(), &.{ root, manifest_file_name });
+    const manifest_source = try std.Io.Dir.cwd().readFileAlloc(
+        io,
+        manifest_path,
+        arena.allocator(),
+        .limited(max_manifest_bytes),
+    );
+    const with_toolchain = try std.mem.replaceOwned(
+        u8,
+        arena.allocator(),
+        manifest_source,
+        "    \"bun\": { \"defaultVersion\": \"1.4.0\" },",
+        "    \"bun\": { \"defaultVersion\": \"1.4.0\" },\n    \"nim\": { \"defaultVersion\": \"2.2.12\" },",
+    );
+    const with_sdk = try std.mem.replaceOwned(
+        u8,
+        arena.allocator(),
+        with_toolchain,
+        "        \"collectionName\": \"electrobun_sdk\"\n      }",
+        "        \"collectionName\": \"electrobun_sdk\"\n      },\n      \"nim\": { \"root\": \"nim-sdk\", \"entrypoint\": \"nim-sdk/electrobun.nim\" }",
+    );
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = manifest_path, .data = with_sdk });
+
+    const resolution = try load(io, arena.allocator(), root, "2.0.0");
+    try std.testing.expectEqualStrings("2.2.12", resolution.toolchains.nim.?);
+    try std.testing.expect(resolution.sdks.nim != null);
+    try std.testing.expect(std.mem.endsWith(u8, resolution.sdks.nim.?.relative_entrypoint, "electrobun.nim"));
+
+    const project_root = try std.fs.path.join(arena.allocator(), &.{ root, "nim-project" });
+    try std.Io.Dir.cwd().createDirPath(io, project_root);
+    const projection = try project(io, arena.allocator(), project_root, resolution, .{});
+    try std.testing.expect(projection.nim_sdk_path != null);
+    try std.testing.expect(projection.nim_entrypoint != null);
+    try std.testing.expect(pathExists(io, projection.nim_sdk_path.?));
+    try std.testing.expect(pathExists(io, projection.nim_entrypoint.?));
 }
 
 test "Electrobun 2.0.1-beta.18 schema-1 devkit preserves its embedded Bun runtime" {

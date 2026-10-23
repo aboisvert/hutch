@@ -19,7 +19,7 @@ test("omitted runtime resolves to Bun and retains custom Bun settings", () => {
   assert.equal(load({ build: { bun: { entrypoint: "src/custom.ts", minify: true } } }).build.bun.entrypoint, "src/custom.ts");
 });
 test("explicit experimental Cottontail and native backends remain selectable", () => {
-  for (const mainProcess of ["bun", "cottontail", "zig", "rust", "go", "odin"]) {
+  for (const mainProcess of ["bun", "cottontail", "zig", "rust", "go", "odin", "nim"]) {
     assert.equal(load({ build: { mainProcess } }).build.mainProcess, mainProcess);
   }
 });

@@ -16,6 +16,7 @@ pub const Kind = enum {
     rust,
     go,
     odin,
+    nim,
     bun,
 
     pub fn name(self: Kind) []const u8 {
@@ -28,6 +29,7 @@ pub const Kind = enum {
             .rust => if (builtin.os.tag == .windows) "rustc.exe" else "rustc",
             .go => if (builtin.os.tag == .windows) "go.exe" else "go",
             .odin => if (builtin.os.tag == .windows) "odin.exe" else "odin",
+            .nim => if (builtin.os.tag == .windows) "nim.exe" else "nim",
             .bun => if (builtin.os.tag == .windows) "bun.exe" else "bun",
         };
     }
@@ -38,6 +40,7 @@ pub const Kind = enum {
             .rust => "rustc",
             .go => "go",
             .odin => "odin",
+            .nim => "nim",
             .bun => "bun",
         };
     }
@@ -45,7 +48,7 @@ pub const Kind = enum {
     fn versionArgs(self: Kind) []const []const u8 {
         return switch (self) {
             .zig, .odin => &.{"version"},
-            .rust, .bun => &.{"--version"},
+            .rust, .bun, .nim => &.{"--version"},
             .go => &.{"version"},
         };
     }
@@ -253,7 +256,18 @@ fn resolveAfterInstalledMiss(
         "hutch: downloading {s} {s} toolchain for {s}\n",
         .{ kind.name(), version, try platformKey() },
     );
-    const bytes = try release_store.fetchBytes(init, allocator, archive.url, max_archive_bytes);
+    const bytes = release_store.fetchBytes(init, allocator, archive.url, max_archive_bytes) catch |err| {
+        // nim-lang.org/download only hosts prebuilt archives for the most
+        // recent Nim releases, so older (or never-published) pins 404 here.
+        // Re-throw the original error; the note just explains why.
+        if (kind == .nim) {
+            std.debug.print(
+                "hutch: nim-lang.org/download only hosts binary archives for recent Nim releases; nim {s} may not be downloadable at {s}. Consider pinning a currently published version (e.g. 2.2.x) or check https://nim-lang.org/download/.\n",
+                .{ version, archive.url },
+            );
+        }
+        return err;
+    };
     try install(init, allocator, home, root, kind, version, archive.filename, bytes);
 
     const installed_binary = try installedBinaryPath(allocator, root, kind);
@@ -516,6 +530,7 @@ fn archiveFor(allocator: std.mem.Allocator, kind: Kind, version: []const u8) !Ar
             },
         ),
         .odin => try odinArchiveName(allocator, version),
+        .nim => try nimArchiveName(allocator, version),
         .bun => try bunArchiveName(allocator),
     };
     const url = switch (kind) {
@@ -526,6 +541,11 @@ fn archiveFor(allocator: std.mem.Allocator, kind: Kind, version: []const u8) !Ar
             allocator,
             "https://github.com/odin-lang/Odin/releases/download/{s}/{s}",
             .{ version, filename },
+        ),
+        .nim => try std.fmt.allocPrint(
+            allocator,
+            "https://nim-lang.org/download/{s}",
+            .{filename},
         ),
         .bun => try std.fmt.allocPrint(
             allocator,
@@ -586,6 +606,20 @@ fn zigHostArch(version: []const u8, os: std.Target.Os.Tag, arch: std.Target.Cpu.
     return if (parsed.order(first_native) == .lt) "x86_64" else "aarch64";
 }
 
+fn nimArchiveName(allocator: std.mem.Allocator, version: []const u8) ![]const u8 {
+    if (builtin.os.tag == .windows and builtin.cpu.arch == .aarch64) return error.NimWindowsArm64Unsupported;
+    if (builtin.os.tag == .windows) {
+        return std.fmt.allocPrint(allocator, "nim-{s}_x64.zip", .{version});
+    }
+    const os = switch (builtin.os.tag) {
+        .macos => "macosx",
+        .linux => "linux",
+        else => return error.UnsupportedToolchainPlatform,
+    };
+    const arch = if (builtin.cpu.arch == .aarch64) "arm64" else "x64";
+    return std.fmt.allocPrint(allocator, "nim-{s}-{s}_{s}.tar.xz", .{ version, os, arch });
+}
+
 fn odinArchiveName(allocator: std.mem.Allocator, version: []const u8) ![]const u8 {
     if (builtin.os.tag == .windows and builtin.cpu.arch == .aarch64) return error.OdinWindowsArm64Unsupported;
     const os = switch (builtin.os.tag) {
@@ -616,7 +650,7 @@ fn rustHostTriple() []const u8 {
 
 fn installedBinaryPath(allocator: std.mem.Allocator, root: []const u8, kind: Kind) ![]const u8 {
     return switch (kind) {
-        .rust, .go => std.fs.path.join(allocator, &.{ root, "bin", kind.executableName() }),
+        .rust, .go, .nim => std.fs.path.join(allocator, &.{ root, "bin", kind.executableName() }),
         .zig, .odin, .bun => std.fs.path.join(allocator, &.{ root, kind.executableName() }),
     };
 }
@@ -732,6 +766,13 @@ fn executableMatchesVersion(
                 prefix = prefix[0 .. prefix.len - 1];
             }
             break :blk std.mem.indexOf(u8, output, prefix) != null;
+        },
+        .nim => blk: {
+            var lines = std.mem.splitScalar(u8, output, '\n');
+            const first_line = std.mem.trim(u8, lines.next() orelse "", " \t\r");
+            const expected = try std.fmt.allocPrint(allocator, "Nim Compiler Version {s}", .{version});
+            defer allocator.free(expected);
+            break :blk std.mem.startsWith(u8, first_line, expected);
         },
     };
 }
@@ -886,6 +927,7 @@ test "toolchain versions cannot escape their toolchain path" {
     try validateVersion(.rust, "1.88.0");
     try validateVersion(.go, "1.26.4");
     try validateVersion(.odin, "dev-2026-07a");
+    try validateVersion(.nim, "2.2.12");
     try validateVersion(.bun, "1.4.0");
 }
 
@@ -1200,8 +1242,20 @@ test "dated Odin pins never select an ambiguous system compiler" {
 test "toolchain archive URLs follow upstream release naming" {
     if (builtin.os.tag == .windows and builtin.cpu.arch == .aarch64) {
         try std.testing.expectError(error.OdinWindowsArm64Unsupported, archiveFor(std.testing.allocator, .odin, "dev-2026-07a"));
+        try std.testing.expectError(error.NimWindowsArm64Unsupported, archiveFor(std.testing.allocator, .nim, "2.2.12"));
         return;
     }
+    const nim_archive = try archiveFor(std.testing.allocator, .nim, "2.2.12");
+    defer std.testing.allocator.free(nim_archive.url);
+    defer std.testing.allocator.free(nim_archive.filename);
+    try std.testing.expect(std.mem.startsWith(u8, nim_archive.url, "https://nim-lang.org/download/"));
+    if (builtin.os.tag == .windows) {
+        try std.testing.expectEqualStrings("nim-2.2.12_x64.zip", nim_archive.filename);
+    } else {
+        try std.testing.expect(std.mem.endsWith(u8, nim_archive.filename, ".tar.xz"));
+        try std.testing.expect(std.mem.indexOf(u8, nim_archive.filename, "2.2.12") != null);
+    }
+
     const archive = try archiveFor(std.testing.allocator, .odin, "dev-2026-07a");
     defer std.testing.allocator.free(archive.url);
     defer std.testing.allocator.free(archive.filename);
