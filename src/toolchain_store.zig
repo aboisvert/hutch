@@ -849,6 +849,10 @@ fn makeExecutable(io: std.Io, path: []const u8) !void {
     try file.setPermissions(io, .executable_file);
 }
 
+/// Electrobun's Nim runtime targets the stable 2.x language and memory
+/// management behavior. Older compilers are EOL and are not supported.
+pub const minimum_nim_version = std.SemanticVersion{ .major = 2, .minor = 0, .patch = 0 };
+
 pub fn validateVersion(kind: Kind, version: []const u8) !void {
     if (version.len == 0 or version.len > 128 or
         std.mem.eql(u8, version, ".") or std.mem.eql(u8, version, ".."))
@@ -863,7 +867,10 @@ pub fn validateVersion(kind: Kind, version: []const u8) !void {
     if (kind == .odin) {
         try validateExactOdinVersion(version);
     } else {
-        _ = std.SemanticVersion.parse(version) catch return error.InvalidToolchainVersion;
+        const parsed = std.SemanticVersion.parse(version) catch return error.InvalidToolchainVersion;
+        if (kind == .nim and parsed.order(minimum_nim_version) == .lt) {
+            return error.UnsupportedNimVersion;
+        }
     }
 }
 
@@ -926,6 +933,8 @@ test "toolchain versions cannot escape their toolchain path" {
     try std.testing.expectError(error.InvalidToolchainVersion, validateVersion(.odin, "dev-2026-13"));
     try std.testing.expectError(error.InvalidToolchainVersion, validateVersion(.bun, "latest"));
     try std.testing.expectError(error.InvalidToolchainVersion, validateVersion(.bun, "1.3"));
+    try std.testing.expectError(error.UnsupportedNimVersion, validateVersion(.nim, "1.6.20"));
+    try std.testing.expectError(error.UnsupportedNimVersion, validateVersion(.nim, "2.0.0-rc1"));
     try validateVersion(.zig, "0.16.0");
     try validateVersion(.rust, "1.88.0");
     try validateVersion(.go, "1.26.4");

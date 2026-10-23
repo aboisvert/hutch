@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const release_store = @import("release_store.zig");
+const toolchain_store = @import("toolchain_store.zig");
 
 const manifest_file_name = "native-devkit.json";
 const max_manifest_bytes = 1024 * 1024;
@@ -747,7 +748,10 @@ fn toolchainVersion(toolchains: std.json.ObjectMap, name: []const u8) ![]const u
     if (std.mem.eql(u8, name, "odin")) {
         try validateExactOdinVersion(version);
     } else {
-        _ = std.SemanticVersion.parse(version) catch return error.InvalidElectrobunToolchainVersion;
+        const parsed = std.SemanticVersion.parse(version) catch return error.InvalidElectrobunToolchainVersion;
+        if (std.mem.eql(u8, name, "nim") and parsed.order(toolchain_store.minimum_nim_version) == .lt) {
+            return error.UnsupportedElectrobunNimVersion;
+        }
     }
     return version;
 }
@@ -1352,6 +1356,46 @@ test "v2 devkit loads Nim toolchain and SDK when manifest includes them" {
     try std.testing.expect(projection.nim_entrypoint != null);
     try std.testing.expect(pathExists(io, projection.nim_sdk_path.?));
     try std.testing.expect(pathExists(io, projection.nim_entrypoint.?));
+}
+
+test "v2 devkit rejects unsupported Nim toolchain versions" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const root = try createTestDevkit(io, arena.allocator(), &tmp, "2.0.0");
+    try tmp.dir.createDirPath(io, "nim-sdk");
+    try tmp.dir.writeFile(io, .{ .sub_path = "nim-sdk/electrobun.nim", .data = "# stub\n" });
+
+    const manifest_path = try std.fs.path.join(arena.allocator(), &.{ root, manifest_file_name });
+    const manifest_source = try std.Io.Dir.cwd().readFileAlloc(
+        io,
+        manifest_path,
+        arena.allocator(),
+        .limited(max_manifest_bytes),
+    );
+    const with_toolchain = try std.mem.replaceOwned(
+        u8,
+        arena.allocator(),
+        manifest_source,
+        "    \"bun\": { \"defaultVersion\": \"1.4.0\" },",
+        "    \"bun\": { \"defaultVersion\": \"1.4.0\" },\n    \"nim\": { \"defaultVersion\": \"1.6.20\" },",
+    );
+    const with_sdk = try std.mem.replaceOwned(
+        u8,
+        arena.allocator(),
+        with_toolchain,
+        "        \"collectionName\": \"electrobun_sdk\"\n      }",
+        "        \"collectionName\": \"electrobun_sdk\"\n      },\n      \"nim\": { \"root\": \"nim-sdk\", \"entrypoint\": \"nim-sdk/electrobun.nim\" }",
+    );
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = manifest_path, .data = with_sdk });
+
+    try std.testing.expectError(
+        error.UnsupportedElectrobunNimVersion,
+        load(io, arena.allocator(), root, "2.0.0"),
+    );
 }
 
 test "Electrobun 2.0.1-beta.18 schema-1 devkit preserves its embedded Bun runtime" {
