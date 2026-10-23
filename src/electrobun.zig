@@ -5220,11 +5220,10 @@ fn buildNimMainExecutable(ctx: *const Context, config: CommandContext, platform_
     const nim_binary = nim_toolchain.binary;
 
     const projection = platform_paths.projection orelse return error.ElectrobunDevkitNotProjected;
-    const nim_sdk_path = projection.nim_sdk_path orelse {
+    const nim_sdk_entrypoint = projection.nim_entrypoint orelse {
         ctx.writeStderr("hutch electrobun: this Electrobun release does not include the Nim SDK\n", .{});
         return error.NimSdkNotFound;
     };
-    const nim_sdk_entrypoint = projection.nim_entrypoint orelse return error.NimSdkNotFound;
     if (!pathExists(ctx.io, nim_sdk_entrypoint)) return error.NimSdkNotFound;
 
     const entrypoint = try resolveMainEntrypoint(ctx, config.root, .nim);
@@ -5239,7 +5238,7 @@ fn buildNimMainExecutable(ctx: *const Context, config: CommandContext, platform_
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(ctx.allocator);
     try argv.append(ctx.allocator, nim_binary);
-    try appendNimBuildArguments(ctx.allocator, &argv, config.build_env, nimcache, nim_sdk_path, nim_out_bin);
+    try appendNimBuildArguments(ctx.allocator, &argv, config.build_env, nimcache, nimSdkImportPath(nim_sdk_entrypoint), nim_out_bin);
     if (builtin.os.tag == .macos) {
         try argv.append(ctx.allocator, "--passL:-mmacosx-version-min=14.0");
     }
@@ -5275,12 +5274,18 @@ fn buildNimMainExecutable(ctx: *const Context, config: CommandContext, platform_
     return nim_out_bin;
 }
 
+fn nimSdkImportPath(sdk_entrypoint: []const u8) []const u8 {
+    // `--path` must point at the directory containing the importable modules,
+    // which is the entrypoint's directory, not necessarily the SDK root.
+    return std.fs.path.dirname(sdk_entrypoint) orelse sdk_entrypoint;
+}
+
 fn appendNimBuildArguments(
     allocator: std.mem.Allocator,
     argv: *std.ArrayList([]const u8),
     build_env: BuildEnvironment,
     nimcache: []const u8,
-    nim_sdk_path: []const u8,
+    nim_import_path: []const u8,
     out_bin: []const u8,
 ) !void {
     // User-global Nim config is skipped to keep builds hermetic (a PATH Nim or
@@ -5295,7 +5300,7 @@ fn appendNimBuildArguments(
         "--verbosity:0",
         "--skipUserCfg",
         try std.fmt.allocPrint(allocator, "--nimcache:{s}", .{nimcache}),
-        try std.fmt.allocPrint(allocator, "--path:{s}", .{nim_sdk_path}),
+        try std.fmt.allocPrint(allocator, "--path:{s}", .{nim_import_path}),
         try std.fmt.allocPrint(allocator, "-o:{s}", .{out_bin}),
     });
     if (build_env != .dev) {
@@ -5370,6 +5375,17 @@ test "Nim main arguments skip only the user config and honor release mode" {
     try std.testing.expect(helper.hasArg(dev_argv.items, "--skipUserCfg"));
     try std.testing.expect(!helper.hasArg(dev_argv.items, "--skipParentCfg"));
     try std.testing.expect(!helper.hasArg(dev_argv.items, "--define:release"));
+}
+
+test "Nim import paths come from the SDK entrypoint directory" {
+    const allocator = std.testing.allocator;
+    const entrypoint = try std.fs.path.join(allocator, &.{ "nim", "sdk", "src", "electrobun.nim" });
+    defer allocator.free(entrypoint);
+    const expected = try std.fs.path.join(allocator, &.{ "nim", "sdk", "src" });
+    defer allocator.free(expected);
+
+    try std.testing.expectEqualStrings(expected, nimSdkImportPath(entrypoint));
+    try std.testing.expectEqualStrings("electrobun.nim", nimSdkImportPath("electrobun.nim"));
 }
 
 test "Windows Odin main processes reserve an eight MiB stack" {
