@@ -5252,7 +5252,7 @@ fn buildNimMainExecutable(ctx: *const Context, config: CommandContext, platform_
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(ctx.allocator);
     try argv.append(ctx.allocator, nim_binary);
-    try appendNimBuildArguments(ctx.allocator, &argv, config.build_env, nimcache, nimSdkImportPath(nim_sdk_entrypoint), nim_out_bin);
+    try appendNimBuildArguments(ctx.allocator, &argv, config.build_env, builtin.os.tag, nimcache, nimSdkImportPath(nim_sdk_entrypoint), nim_out_bin);
     if (builtin.os.tag == .macos) {
         try argv.append(ctx.allocator, "--passL:-mmacosx-version-min=14.0");
     }
@@ -5279,7 +5279,7 @@ fn buildNimMainExecutable(ctx: *const Context, config: CommandContext, platform_
         if (result.stdout.len > 0) ctx.writeStdout("{s}", .{result.stdout});
         if (result.stderr.len > 0) ctx.writeStderr("{s}", .{result.stderr});
         if (builtin.os.tag == .windows) {
-            ctx.writeStderr("Nim on Windows requires link.exe from Visual Studio Build Tools.\n", .{});
+            ctx.writeStderr("hutch electrobun: Nim on Windows compiles with MSVC (--cc:vcc). If compilation failed because cl.exe or link.exe is missing, install Visual Studio Build Tools.\n", .{});
         }
         return error.NimBuildFailed;
     }
@@ -5298,6 +5298,7 @@ fn appendNimBuildArguments(
     allocator: std.mem.Allocator,
     argv: *std.ArrayList([]const u8),
     build_env: BuildEnvironment,
+    os_tag: std.Target.Os.Tag,
     nimcache: []const u8,
     nim_import_path: []const u8,
     out_bin: []const u8,
@@ -5317,6 +5318,10 @@ fn appendNimBuildArguments(
         try std.fmt.allocPrint(allocator, "--path:{s}", .{nim_import_path}),
         try std.fmt.allocPrint(allocator, "-o:{s}", .{out_bin}),
     });
+    // Nim's default Windows C compiler is gcc, but the Windows archives only
+    // ship Nim itself and hutch's other native Windows builds already assume
+    // Visual Studio Build Tools.
+    if (os_tag == .windows) try argv.append(allocator, "--cc:vcc");
     if (build_env != .dev) {
         try argv.append(allocator, "--define:release");
     }
@@ -5372,23 +5377,31 @@ test "Nim main arguments skip only the user config and honor release mode" {
 
     var release_argv: std.ArrayList([]const u8) = .empty;
     var dev_argv: std.ArrayList([]const u8) = .empty;
+    var windows_argv: std.ArrayList([]const u8) = .empty;
     defer release_argv.deinit(std.testing.allocator);
     defer dev_argv.deinit(std.testing.allocator);
+    defer windows_argv.deinit(std.testing.allocator);
     defer helper.freeFormatted(std.testing.allocator, release_argv.items);
     defer helper.freeFormatted(std.testing.allocator, dev_argv.items);
+    defer helper.freeFormatted(std.testing.allocator, windows_argv.items);
 
-    try appendNimBuildArguments(std.testing.allocator, &release_argv, .canary, "/nimcache", "/nim/sdk", "/out/main");
+    try appendNimBuildArguments(std.testing.allocator, &release_argv, .canary, .linux, "/nimcache", "/nim/sdk", "/out/main");
     try std.testing.expect(helper.hasArg(release_argv.items, "--skipUserCfg"));
     try std.testing.expect(!helper.hasArg(release_argv.items, "--skipParentCfg"));
     try std.testing.expect(helper.hasArg(release_argv.items, "--nimcache:/nimcache"));
     try std.testing.expect(helper.hasArg(release_argv.items, "--path:/nim/sdk"));
     try std.testing.expect(helper.hasArg(release_argv.items, "-o:/out/main"));
     try std.testing.expect(helper.hasArg(release_argv.items, "--define:release"));
+    try std.testing.expect(!helper.hasArg(release_argv.items, "--cc:vcc"));
 
-    try appendNimBuildArguments(std.testing.allocator, &dev_argv, .dev, "/nimcache", "/nim/sdk", "/out/main");
+    try appendNimBuildArguments(std.testing.allocator, &dev_argv, .dev, .linux, "/nimcache", "/nim/sdk", "/out/main");
     try std.testing.expect(helper.hasArg(dev_argv.items, "--skipUserCfg"));
     try std.testing.expect(!helper.hasArg(dev_argv.items, "--skipParentCfg"));
     try std.testing.expect(!helper.hasArg(dev_argv.items, "--define:release"));
+    try std.testing.expect(!helper.hasArg(dev_argv.items, "--cc:vcc"));
+
+    try appendNimBuildArguments(std.testing.allocator, &windows_argv, .canary, .windows, "/nimcache", "/nim/sdk", "/out/main");
+    try std.testing.expect(helper.hasArg(windows_argv.items, "--cc:vcc"));
 }
 
 test "Nim import paths come from the SDK entrypoint directory" {
