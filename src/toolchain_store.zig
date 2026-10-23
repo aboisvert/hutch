@@ -770,7 +770,10 @@ fn executableMatchesVersion(
         .nim => blk: {
             var lines = std.mem.splitScalar(u8, output, '\n');
             const first_line = std.mem.trim(u8, lines.next() orelse "", " \t\r");
-            const expected = try std.fmt.allocPrint(allocator, "Nim Compiler Version {s}", .{version});
+            // Nim prints the version followed by build details, e.g.
+            // "Nim Compiler Version 2.2.12 [MacOSX: arm64]". Requiring the
+            // trailing space keeps a 2.2.1 pin from matching 2.2.12.
+            const expected = try std.fmt.allocPrint(allocator, "Nim Compiler Version {s} ", .{version});
             defer allocator.free(expected);
             break :blk std.mem.startsWith(u8, first_line, expected);
         },
@@ -1237,6 +1240,28 @@ test "dated Odin pins never select an ambiguous system compiler" {
         .odin,
         "dev-2026-07a",
     ));
+}
+
+test "Nim version matching requires an exact compiler version" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "nim",
+        .data = "#!/bin/sh\nprintf 'Nim Compiler Version 2.2.12 [MacOSX: arm64]\\n'\n",
+        .flags = .{ .permissions = .executable_file },
+    });
+    const relative = try std.fs.path.join(arena.allocator(), &.{ ".zig-cache", "tmp", &tmp.sub_path, "nim" });
+    const executable = try std.Io.Dir.cwd().realPathFileAlloc(io, relative, arena.allocator());
+
+    try std.testing.expect(try executableMatchesVersion(io, arena.allocator(), executable, .nim, "2.2.12"));
+    try std.testing.expect(!try executableMatchesVersion(io, arena.allocator(), executable, .nim, "2.2.1"));
+    try std.testing.expect(!try executableMatchesVersion(io, arena.allocator(), executable, .nim, "2.2"));
 }
 
 test "toolchain archive URLs follow upstream release naming" {
