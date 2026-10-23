@@ -5354,6 +5354,10 @@ test "macOS Odin main arguments pin deployment and generic CPU compatibility" {
 }
 
 test "Nim main arguments skip only the user config and honor release mode" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
     const helper = struct {
         fn hasArg(list: []const []const u8, needle: []const u8) bool {
             for (list) |item| {
@@ -5361,31 +5365,13 @@ test "Nim main arguments skip only the user config and honor release mode" {
             }
             return false;
         }
-        // The helper allocates the formatted flags; the static literals are
-        // not owned here, so only arguments with these prefixes are freed.
-        fn freeFormatted(allocator: std.mem.Allocator, list: []const []const u8) void {
-            for (list) |item| {
-                if (std.mem.startsWith(u8, item, "--nimcache:") or
-                    std.mem.startsWith(u8, item, "--path:") or
-                    std.mem.startsWith(u8, item, "-o:"))
-                {
-                    allocator.free(item);
-                }
-            }
-        }
     };
 
     var release_argv: std.ArrayList([]const u8) = .empty;
     var dev_argv: std.ArrayList([]const u8) = .empty;
     var windows_argv: std.ArrayList([]const u8) = .empty;
-    defer release_argv.deinit(std.testing.allocator);
-    defer dev_argv.deinit(std.testing.allocator);
-    defer windows_argv.deinit(std.testing.allocator);
-    defer helper.freeFormatted(std.testing.allocator, release_argv.items);
-    defer helper.freeFormatted(std.testing.allocator, dev_argv.items);
-    defer helper.freeFormatted(std.testing.allocator, windows_argv.items);
 
-    try appendNimBuildArguments(std.testing.allocator, &release_argv, .canary, .linux, "/nimcache", "/nim/sdk", "/out/main");
+    try appendNimBuildArguments(allocator, &release_argv, .canary, .linux, "/nimcache", "/nim/sdk", "/out/main");
     try std.testing.expect(helper.hasArg(release_argv.items, "--skipUserCfg"));
     try std.testing.expect(!helper.hasArg(release_argv.items, "--skipParentCfg"));
     try std.testing.expect(helper.hasArg(release_argv.items, "--nimcache:/nimcache"));
@@ -5394,13 +5380,13 @@ test "Nim main arguments skip only the user config and honor release mode" {
     try std.testing.expect(helper.hasArg(release_argv.items, "--define:release"));
     try std.testing.expect(!helper.hasArg(release_argv.items, "--cc:vcc"));
 
-    try appendNimBuildArguments(std.testing.allocator, &dev_argv, .dev, .linux, "/nimcache", "/nim/sdk", "/out/main");
+    try appendNimBuildArguments(allocator, &dev_argv, .dev, .linux, "/nimcache", "/nim/sdk", "/out/main");
     try std.testing.expect(helper.hasArg(dev_argv.items, "--skipUserCfg"));
     try std.testing.expect(!helper.hasArg(dev_argv.items, "--skipParentCfg"));
     try std.testing.expect(!helper.hasArg(dev_argv.items, "--define:release"));
     try std.testing.expect(!helper.hasArg(dev_argv.items, "--cc:vcc"));
 
-    try appendNimBuildArguments(std.testing.allocator, &windows_argv, .canary, .windows, "/nimcache", "/nim/sdk", "/out/main");
+    try appendNimBuildArguments(allocator, &windows_argv, .canary, .windows, "/nimcache", "/nim/sdk", "/out/main");
     try std.testing.expect(helper.hasArg(windows_argv.items, "--cc:vcc"));
 }
 

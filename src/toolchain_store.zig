@@ -1283,13 +1283,26 @@ test "toolchain archive URLs follow upstream release naming" {
     const nim_archive = try archiveFor(std.testing.allocator, .nim, "2.2.12");
     defer std.testing.allocator.free(nim_archive.url);
     defer std.testing.allocator.free(nim_archive.filename);
-    try std.testing.expect(std.mem.startsWith(u8, nim_archive.url, "https://nim-lang.org/download/"));
-    if (builtin.os.tag == .windows) {
-        try std.testing.expectEqualStrings("nim-2.2.12_x64.zip", nim_archive.filename);
-    } else {
-        try std.testing.expect(std.mem.endsWith(u8, nim_archive.filename, ".tar.xz"));
-        try std.testing.expect(std.mem.indexOf(u8, nim_archive.filename, "2.2.12") != null);
-    }
+    const expected_filename = switch (builtin.os.tag) {
+        .windows => "nim-2.2.12_x64.zip",
+        .macos => if (builtin.cpu.arch == .aarch64)
+            "nim-2.2.12-macosx_arm64.tar.xz"
+        else
+            "nim-2.2.12-macosx_x64.tar.xz",
+        .linux => if (builtin.cpu.arch == .aarch64)
+            "nim-2.2.12-linux_arm64.tar.xz"
+        else
+            "nim-2.2.12-linux_x64.tar.xz",
+        else => unreachable,
+    };
+    try std.testing.expectEqualStrings(expected_filename, nim_archive.filename);
+    const expected_url = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "https://nim-lang.org/download/{s}",
+        .{expected_filename},
+    );
+    defer std.testing.allocator.free(expected_url);
+    try std.testing.expectEqualStrings(expected_url, nim_archive.url);
 
     const archive = try archiveFor(std.testing.allocator, .odin, "dev-2026-07a");
     defer std.testing.allocator.free(archive.url);
