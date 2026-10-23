@@ -709,6 +709,7 @@ fn projectedDevkitMatchesProductVersion(ctx: *const Context) bool {
 
 fn prepareProject(ctx: *const Context, config: CommandContext) !void {
     const main_process = try getMainProcess(config.root);
+    if (main_process == .nim) try preflightNimTarget(ctx);
     const local_cottontail = if (main_process == .cottontail)
         try configuredBundledCottontailOverride(ctx, config.build_env)
     else
@@ -748,6 +749,7 @@ fn prepareProject(ctx: *const Context, config: CommandContext) !void {
     // the devkit and platform artifacts under the lock that commits their
     // reachability snapshot.
     const platform_paths = try getPlatformPathsUnderGraph(ctx, config.root);
+    if (main_process == .nim) try preflightNimDevkit(ctx, platform_paths);
     var objects: std.ArrayList(managed_store.ManagedObject) = .empty;
     if (platform_paths.devkit) |devkit| {
         const managed = try managed_store.managedElectrobunObjects(
@@ -5203,16 +5205,28 @@ fn buildOdinMainExecutable(ctx: *const Context, config: CommandContext, platform
     return odin_out_bin;
 }
 
-fn buildNimMainExecutable(ctx: *const Context, config: CommandContext, platform_paths: PlatformPaths, bundle: AppBundlePaths) ![]const u8 {
+fn preflightNimTarget(ctx: *const Context) !void {
     if (builtin.os.tag == .windows and builtin.cpu.arch == .aarch64) {
         ctx.writeStderr("hutch electrobun: Nim main processes are not supported on Windows ARM64\n", .{});
         return error.NimWindowsArm64Unsupported;
     }
+}
+
+fn preflightNimDevkit(ctx: *const Context, platform_paths: PlatformPaths) !void {
     const devkit = platform_paths.devkit orelse return error.ElectrobunDevkitNotResolved;
     if (devkit.toolchains.nim == null) {
         ctx.writeStderr("hutch electrobun: this Electrobun release does not include Nim support\n", .{});
         return error.NimNotSupportedByElectrobunRelease;
     }
+    if (devkit.sdks.nim == null) {
+        ctx.writeStderr("hutch electrobun: this Electrobun release does not include the Nim SDK\n", .{});
+        return error.NimSdkNotFound;
+    }
+}
+
+fn buildNimMainExecutable(ctx: *const Context, config: CommandContext, platform_paths: PlatformPaths, bundle: AppBundlePaths) ![]const u8 {
+    try preflightNimTarget(ctx);
+    try preflightNimDevkit(ctx, platform_paths);
 
     const leased_nim_toolchain = try resolveBuildToolchain(ctx, config.root, platform_paths, .nim);
     defer leased_nim_toolchain.close(ctx.io);
