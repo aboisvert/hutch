@@ -80,7 +80,9 @@ process.exitCode=37;
   assert.equal(result.status, 37, `${entrypoint}: ${result.stderr || result.stdout}`);
   const value = JSON.parse(result.stdout.trim());
   assert.equal(value.bun, defaultBunVersion);
-  assert.equal(realpathSync(value.exe), realpathSync(expectedBun));
+  // Windows temp paths can use an 8.3 alias while Bun reports the long name.
+  // Native realpath asks the OS to canonicalize both spellings of the file.
+  assert.equal(realpathSync.native(value.exe), realpathSync.native(expectedBun));
   if (process.platform !== 'win32') assert.equal(value.pid, result.pid, 'POSIX runtime dispatch must replace the current process');
   assert.deepEqual(value.args, args);
   assert.equal(value.value, 'inherited value');
